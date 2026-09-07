@@ -1,0 +1,4 @@
+[HEADER: tile_row_idx, tile_col_idx, output_row_idx, block_exponent (8b), scale_factor (4b)]
+[PAYLOAD: mantissa_0..mantissa_3 (5b each)]
+
+A possible packet config.
