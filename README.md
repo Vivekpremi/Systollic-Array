@@ -18,8 +18,9 @@ Together the goal is an array that is both **memory-efficient** (BFP) and **hard
 2. [Mathematical Background](#mathematical-background)
 3. [File-by-File Documentation](#file-by-file-documentation)
 4. [Known Issues Summary](#known-issues-summary)
-5. [Roadmap to an ASIC-Ready Design](#roadmap-to-an-asic-ready-design)
-6. [Conclusion](#conclusion)
+5. [Design Concerns & Justifications](#design-concerns--justifications)
+6. [Roadmap to an ASIC-Ready Design](#roadmap-to-an-asic-ready-design)
+7. [Conclusion](#conclusion)
 
 ---
 
@@ -376,6 +377,49 @@ This is a reasonable, compact packet format for a 4-wide block, and lines up wit
 | 9 | `tb_TOP_1.v` | `$dumpvars(0, tb_TOP)` references a non-existent module name | Low (fix is trivial) |
 | 10 | `systolic_array.v` | Genvar `i` reused for two unrelated (row vs. column) purposes; only works because array is square | Low |
 | 11 | `exponential_CORDIC.v` | Unused `Int_WIDTH`/`DATA_WIDTH` parameters; `rst` named as if active-high but used active-low | Low |
+
+---
+
+## Design Concerns & Justifications
+
+This section documents open design questions that came up during development, along with the reasoning for why the current approach is (or isn't) justified. Recording these here rather than only resolving them in conversation, so the reasoning survives and can be revisited later.
+
+### Concern 1: Is BFP even worth it, if the host only speaks FP?
+
+**The concern, stated plainly:** The CPU/host driving this accelerator stores and produces tensors in FP (FP32/FP16/BF16). It cannot natively "send a BFP block" — so doesn't that mean:
+
+1. The driver/host has to convert FP → BFP before sending data in,
+2. the chip has to decode BFP back into something it can compute with,
+3. compute happens,
+4. the chip has to re-encode results back into BFP for storage/forwarding,
+5. and finally the host needs the answer back in FP, requiring one more conversion —
+
+and if there are *that* many conversions surrounding the compute, is the BFP compression actually saving anything, or just adding overhead around a computation that ends up FP-in, FP-out anyway?
+
+**Resolution: yes, it's worth it — but only because of *where* each conversion happens and *how many times each converted value gets reused* before the next conversion. Compression ratio alone doesn't justify the scheme; reuse does.**
+
+**1. A software driver absolutely can send BFP blocks — this isn't a hardware limitation.**
+The FP → BFP encode (Algorithm 1 in the reference format: find block max exponent, align mantissas, log-transform, quantize) can run entirely as a **host-side software step**, before any data crosses the PCIe/interconnect boundary into the accelerator's memory. The CPU already has the tensor in FP in its own memory; nothing requires it to ship raw FP32 bit patterns to the device. This is exactly what the accelerator architectures this project follows assume: the encode/decode procedure is described independent of *where* it runs, and running it on the host (or a small dedicated front-end) means **the expensive on-chip/DRAM traffic never has to carry full FP width in the first place.**
+
+**2. The real question isn't "how many conversion steps exist" — it's "how many times is each converted value reused before it's converted again."**
+A systolic array's entire purpose is data reuse: one operand sits in a PE and streams against many other operands before it's ever discarded. That reuse is what amortizes the one-time cost of getting a value into BFP:
+
+| Step | Where it happens | Frequency relative to compute |
+|---|---|---|
+| FP → BFP (weights) | once, at load time (driver or front-end) | paid once per weight; that weight is then reused across every activation it multiplies against in the array — tens to thousands of reuses |
+| FP → BFP (input activations) | once, at input time | paid once per input; reused across every output it contributes to |
+| BFP flowing SA → drain logic → re-block → next layer | entirely on-chip | this is the **high-volume, repeated traffic** BFP is actually optimizing — it should never touch FP at all |
+| Descaling (BFP → wider log-domain fixed-point, inside the PE datapath) | once per operand, per pass through a PE | *not* an FP conversion — it only undoes the 5-bit quantization/scale-factor compression; the value stays in log-domain fixed-point the whole time |
+| BFP → FP (final output) | once, at the very last layer, before handing back to the host | small: the final output tensor is typically orders of magnitude smaller than the weights/activations that produced it |
+
+So the FP boundary conversions are **one-time costs at the edges of the pipeline**, while the value they produce gets reused many times *inside* the pipeline without ever paying the FP tax again. The "convert → compute → convert back" pattern is real, but it happens once per value at the chip's I/O boundary, not once per operation inside the array.
+
+**3. Where this justification would actually break down (worth watching for):**
+- **Low data reuse.** If a workload uses every value in exactly one multiply and then discards it, there's nothing to amortize the conversion cost over, and plain FP16/BF16 could beat BFP+conversion overhead outright. The benefit scales with reuse factor, not just with compression ratio.
+- **Converting back to FP between every layer.** If intermediate layer outputs are decoded to full FP and re-encoded on every layer boundary (e.g. an unnecessary host round-trip per layer, or an on-chip decode/re-encode that isn't actually needed), the conversion cost gets paid every layer instead of once — this would erase most of the benefit. **This is why it matters that intermediate results stay in BFP end-to-end on-chip** (confirmed data flow: systolic array → drain/iface → format_convertor → next layer's input, never touching FP in between).
+- **Large output tensors.** If the workload's final output is *not* small relative to its weights/activations (unlike, say, classification logits or an embedding vector), the one-time output decode stops being negligible and should be budgeted more carefully.
+
+**Conclusion for this project:** the design is justified specifically because it targets a **reuse-heavy accelerator** (a systolic array, whose entire architectural point is operand reuse) where FP only has to exist at the two edges of the pipeline — decode once on the way in, encode once on the way out — while all the expensive, repeated inter-layer and on-chip traffic in between stays compressed the whole time. The action item this implies for the RTL: make sure the "keep in BFP vs. decode to FP" decision is an explicit control-plane choice (owned by the controller), not something that happens implicitly or too often, so the reuse argument above actually holds in practice and doesn't quietly degrade into per-layer FP round-trips.
 
 ---
 
