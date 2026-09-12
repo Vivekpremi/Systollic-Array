@@ -4,12 +4,15 @@
 
 `timescale 1ns/1ps
 
-module shifter (
-
-input [31:0] mant,
-input [7:0] exp,
-input left,
-output [31:0] out
+module shifter #(
+    parameter DATA_WIDTH = 32,
+    parameter EXP_WIDTH = 8
+    
+)(
+    input [DATA_WIDTH-1:0] mant,
+    input [EXP_WIDTH-1:0] exp,
+    input left,
+    output [DATA_WIDTH-1:0] out
 
 );
 
@@ -17,15 +20,20 @@ assign out = left ? (mant << exp) : (mant >> exp);
 
 endmodule
 
-module shifter_quantizer (
+module shifter_quantizer #(
+  parameter DATA_WIDTH = 32,
+    parameter EXP_WIDTH = 8,
+    parameter BLOCK_MANTISSA_WIDTH = 5,
+    parameter SCALE_FACTOR_WIDTH = 4
+    )(
 
-input [31:0] mant,
-input [4:0] scale_factor,
-output [4:0] out
+input [DATA_WIDTH-1:0] mant,
+input [SCALE_FACTOR_WIDTH-1:0] scale_factor,
+output [BLOCK_MANTISSA_WIDTH-1:0] out
 
 );
 
-wire [31:0] scaled_mant;
+wire [DATA_WIDTH-1:0] scaled_mant;
 assign scaled_mant = (mant >> scale_factor);
 
 assign out = {1'b0,(scaled_mant > 15)? 4'b1111: scaled_mant[3:0]};
@@ -140,9 +148,12 @@ module round_2_power (
 endmodule
 
 
-module descaling (
-    input [4:0] mant,
-    input [3:0] inp_scale_factor,
+module descaling #(
+    parameter MANTISSA_WIDTH = 5,
+    parameter SCALE_FACTOR_WIDTH = 4
+)(
+    input [MANTISSA_WIDTH-1:0] mant,
+    input [SCALE_FACTOR_WIDTH-1:0] inp_scale_factor,
     output [15:0] inp_pe
 );
 

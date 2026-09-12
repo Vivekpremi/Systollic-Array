@@ -18,7 +18,7 @@ parameter init = 2'b00;
 parameter compute = 2'b01;
 parameter out = 2'b10;
 
-localparam [8:0] e [0:7] = '{
+localparam [8:0] e [0:Frac_WIDTH-1] = '{
 9'b001_011_101,//>>0 +>>1 +>>3 +>>5
 9'b010_101_000,//>>0 +>>2 +>>5     
 9'b011_111_000,//>>0 +>>3 +>>7     
@@ -33,10 +33,11 @@ reg [1:0]state;
 //assign initial values
 //reg [18:0] e[0:7];
 
-reg [2:0] iteration_counter; // Counter for iterations
+reg [$clog2(Frac_WIDTH)-1:0] iteration_counter; // Counter for iterations
 reg [Frac_WIDTH-1:0] z; // fraction(x)
 reg [Frac_WIDTH-1:0] power_of_two; // 2^-iteration_counter
 reg signed [Frac_WIDTH+2:0] expx;
+
 always@(posedge clk or negedge rst) begin
     if(!rst) begin
         iteration_counter <= 3'b0;
@@ -69,7 +70,7 @@ always@(posedge clk or negedge rst) begin
                 /////////////each consecutive set of  bits contsains the shift amount////////////////////
             end
             compute: begin
-        if(iteration_counter <= 7) begin
+        if(iteration_counter <= 3'b111) begin
             if(power_of_two <= z) begin
                 
                 z <= z - power_of_two; // Update z
@@ -80,7 +81,7 @@ always@(posedge clk or negedge rst) begin
             end
             power_of_two <= power_of_two >> 1; // Update power_of_two for the next iteration
             iteration_counter <= iteration_counter + 1; // Increment iteration counter '
-            state <= (iteration_counter == 7) ? out : compute; // Move to output state after last iteration
+            state <= (iteration_counter == 3'b111) ? out : compute; // Move to output state after last iteration
         end
     
             end

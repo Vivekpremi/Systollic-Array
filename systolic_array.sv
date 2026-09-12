@@ -1,54 +1,55 @@
-`include "PE.v"
+`include "PE.sv"
 module systolic_array #(
     parameter DATA_WIDTH = 32,
     parameter EXP_WIDTH = 8,
-    parameter MANTISSA_WIDTH = 16
+    parameter MANTISSA_WIDTH = 16,
+    parameter ARRAY_SIZE = 4
 )
 (
     input wire clk,
     input wire rst_n,
-    input wire [MANTISSA_WIDTH-1:0] mantissa_col_0 [15:0],
-    input wire [MANTISSA_WIDTH-1:0] mantissa_row_0 [15:0],
-    input wire [EXP_WIDTH-1:0] exponent_col_0 [15:0],
-    input wire [EXP_WIDTH-1:0] exponent_row_0 [15:0],
-    input wire valid_in_row_0[15:0],
-    input wire valid_in_col_0[15:0],
-    input wire last_in_row_0[15:0],
-    input wire last_in_col_0[15:0],
+    input wire [MANTISSA_WIDTH-1:0] mantissa_col_0 [ARRAY_SIZE-1:0],
+    input wire [MANTISSA_WIDTH-1:0] mantissa_row_0 [ARRAY_SIZE-1:0],
+    input wire [EXP_WIDTH-1:0] exponent_col_0 [ARRAY_SIZE-1:0],
+    input wire [EXP_WIDTH-1:0] exponent_row_0 [ARRAY_SIZE-1:0],
+    input wire valid_in_row_0[ARRAY_SIZE-1:0],
+    input wire valid_in_col_0[ARRAY_SIZE-1:0],
+    input wire last_in_row_0[ARRAY_SIZE-1:0],
+    input wire last_in_col_0[ARRAY_SIZE-1:0],
 
-    output wire [DATA_WIDTH-1:0] Res_out [15:0][15:0],
-    output wire [7:0] exp_out [15:0][15:0],
-    output wire [15:0] valid_out[15:0],
-    output wire set_i_ready[15:0],
-    output wire demand_from_mem[15:0]
+    output wire [DATA_WIDTH-1:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    output wire [7:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    output wire [ARRAY_SIZE-1:0] valid_out[ARRAY_SIZE-1:0],
+    output wire set_i_ready[ARRAY_SIZE-1:0],
+    output wire demand_from_mem[ARRAY_SIZE-1:0]
 );
 //16 X 16 systolic array using genvar
 genvar i, j;
-    wire [MANTISSA_WIDTH-1:0] mantissa_col_i_j [16:0][16:0];
-    wire [MANTISSA_WIDTH-1:0] mantissa_row_i_j [16:0][16:0];
-    wire [MANTISSA_WIDTH-1:0] mantissa_col_i_j_out [16:0][16:0];
-    wire [MANTISSA_WIDTH-1:0] mantissa_row_i_j_out [16:0][16:0];
-    wire [EXP_WIDTH-1:0] exponent_col_j [16:0][16:0];
-    wire [EXP_WIDTH-1:0] exponent_row_i [16:0][16:0];
-    wire [EXP_WIDTH-1:0] exponent_col_j_out [16:0][16:0];
-    wire [EXP_WIDTH-1:0] exponent_row_i_out [16:0][16:0];
+    wire [MANTISSA_WIDTH-1:0] mantissa_col_i_j [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire [MANTISSA_WIDTH-1:0] mantissa_row_i_j [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire [MANTISSA_WIDTH-1:0] mantissa_col_i_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire [MANTISSA_WIDTH-1:0] mantissa_row_i_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire [EXP_WIDTH-1:0] exponent_col_j [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire [EXP_WIDTH-1:0] exponent_row_i [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire [EXP_WIDTH-1:0] exponent_col_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire [EXP_WIDTH-1:0] exponent_row_i_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
   
-    wire valid_in_row[15:0][15:0];
-    wire valid_in_col[15:0][15:0];
-    wire valid_out_row[15:0][15:0];
-    wire valid_out_col[15:0][15:0];
-    wire valid_condition[15:0][15:0];
+    wire valid_in_row[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
+    wire valid_in_col[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
+    wire valid_out_row[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
+    wire valid_out_col[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
+    wire valid_condition[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
 
-    reg last_hori[15:0];
-    reg last_vert[15:0];
+    reg last_hori[ARRAY_SIZE-1:0];
+    reg last_vert[ARRAY_SIZE-1:0];
 
-    wire last_out[15:0][15:0];
-    wire last_row_in[15:0][15:0];
-    wire last_col_in[15:0][15:0];
+    wire last_out[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
+    wire last_row_in[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
+    wire last_col_in[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
 
 generate    
-    for(i = 0; i < 16; i = i + 1) begin : row_loop
-        for(j = 0; j < 16; j = j + 1) begin : col_loop
+    for(i = 0; i < ARRAY_SIZE; i = i + 1) begin : row_loop
+        for(j = 0; j < ARRAY_SIZE; j = j + 1) begin : col_loop
 
 PE PE_i_j (
     .clk(clk),

@@ -4,43 +4,65 @@
 module top_module #(
     parameter MANTISSA_WIDTH = 16,
     parameter EXP_WIDTH = 8,
-    parameter DATA_WIDTH = 32
+    parameter DATA_WIDTH = 32,
+    parameter ARRAY_SIZE = 4,
+    parameter LOG2_ARRAY_SIZE = $clog2(ARRAY_SIZE),
+    parameter BLOCK_MANTISSA_WIDTH = 5,
+    parameter SCALE_FACTOR_WIDTH = 4
 )(
     input wire clk,
     input wire rst_n,
-    input wire [MANTISSA_WIDTH-1:0] mantissa_col_0 [15:0],
-    input wire [MANTISSA_WIDTH-1:0] mantissa_row_0 [15:0],
-    input wire [EXP_WIDTH-1:0] exponent_col_0 [15:0],
-    input wire [EXP_WIDTH-1:0] exponent_row_0 [15:0],
-    input wire valid_in_row_0[15:0],
-    input wire valid_in_col_0[15:0],
-    input wire last_in_row_0[15:0],
-    input wire last_in_col_0[15:0],
+    input wire [MANTISSA_WIDTH-1:0] mantissa_col_0 [ARRAY_SIZE-1:0],
+    input wire [MANTISSA_WIDTH-1:0] mantissa_row_0 [ARRAY_SIZE-1:0],
+    input wire [EXP_WIDTH-1:0] exponent_col_0 [ARRAY_SIZE-1:0],
+    input wire [EXP_WIDTH-1:0] exponent_row_0 [ARRAY_SIZE-1:0],
+    input wire valid_in_row_0[ARRAY_SIZE-1:0],
+    input wire valid_in_col_0[ARRAY_SIZE-1:0],
+    input wire last_in_row_0[ARRAY_SIZE-1:0],
+    input wire last_in_col_0[ARRAY_SIZE-1:0],
     input wire start,
 //    input wire max_exp_calculated,
 
-    output wire [15:0] valid_out [15:0],
+    output wire [ARRAY_SIZE-1:0] valid_out [ARRAY_SIZE-1:0],
     output wire valid_exp_out,
-    output wire [7:0] exponent_out_1,
-    output wire [7:0] exponent_out_2,
+    output wire [EXP_WIDTH-1:0] exponent_out_1,
+    output wire [EXP_WIDTH-1:0] exponent_out_2,
     output wire [DATA_WIDTH-1:0] mantissa_out_1,
     output wire [DATA_WIDTH-1:0] mantissa_out_2,
-    output wire [7:0] exp_m_out_1,
-    output wire [7:0] exp_m_out_2,
+    output wire [EXP_WIDTH-1:0] exp_m_out_1,
+    output wire [EXP_WIDTH-1:0] exp_m_out_2,
     output wire valid_man_out,
     output wire [1:0] iface_state_out,
-    output wire set_i_ready[15:0],
-    output wire [DATA_WIDTH-1:0] Res_out [15:0][15:0],
+    output wire set_i_ready[ARRAY_SIZE-1:0],
+    output wire [DATA_WIDTH-1:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
     output wire last_exp_sent,
     output wire mantissas_sent_out,
     output wire block_ready,
-    output wire [4:0] scale_factor,
-    output wire [7:0] max_exp,
-    output wire [16*5 -1 :0] mantissa_out,
+    output wire [SCALE_FACTOR_WIDTH-1:0] scale_factor,
+    output wire [EXP_WIDTH-1:0] max_exp,
+    output wire [ARRAY_SIZE*BLOCK_MANTISSA_WIDTH -1 :0] mantissa_out,
     output wire max_exp_calculated
 );
+// // Block Storing Refisters
+// reg [31:0] block_col [15:0]; // 31:27(m1), 26:22(m2), 21:17(m3), 16:12(m4)
+// reg [31:0] block_row [15:0];
+// //Add Descalers
+// genvar i;
+// wire [4:0] mantissa_col_scaled [15:0];
+// wire [4:0] mantissa_row_scaled [15:0];
+// wire [3:0] scale_factor_col [15:0];
+// wire [3:0] scale_factor_row [15:0];
 
-wire [EXP_WIDTH-1:0] exp_out [15:0][15:0];
+// genvar j;
+
+// descaling descaler(
+//     .mant(),
+//     .inp_scale_factor(),
+//     .inp_pe()
+// );
+
+
+wire [EXP_WIDTH-1:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
 systolic_array #(
     .DATA_WIDTH(DATA_WIDTH),
     .EXP_WIDTH(EXP_WIDTH),
@@ -63,18 +85,17 @@ SA (
     .set_i_ready(set_i_ready)
 );
 
-wire start_op = ((valid_out[0][1]) ? block_ready : valid_out[0][0]) && (block_cnt != 15);
+reg [LOG2_ARRAY_SIZE-1:0] block_cnt;
+wire start_op = ((valid_out[0][1]) ? block_ready : valid_out[0][0]) && (block_cnt != LOG2_ARRAY_SIZE'(ARRAY_SIZE-1));
 
-reg [3:0] block_cnt;
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         block_cnt <= 0;
     end
     else begin
         if(block_ready) begin
-            block_cnt <= (block_cnt == 15) ? 0 : block_cnt + 1; // Increment block count when block is ready, wrap around after 15
-    end
-
+            block_cnt <= (block_cnt == LOG2_ARRAY_SIZE'(ARRAY_SIZE-1)) ? 0 : block_cnt + 1; // Increment block count when block is ready, wrap around after ARRAY_SIZE-1
+        end
     end
 end
 iface iface(

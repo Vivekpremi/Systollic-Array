@@ -6,37 +6,41 @@ module tb_TOP_1;
     parameter DATA_WIDTH = 32;
     parameter EXP_WIDTH = 8;
     parameter MANTISSA_WIDTH = 16;
+    parameter ARRAY_SIZE = 4;
+    parameter LOG2_ARRAY_SIZE = $clog2(ARRAY_SIZE);
+    parameter BLOCK_MANTISSA_WIDTH = 5;
+    parameter SCALE_FACTOR_WIDTH = 4;
 
 
     reg clk;
     reg rst_n;
-    reg [MANTISSA_WIDTH-1:0] mantissa_col_0 [15:0];
+    reg [MANTISSA_WIDTH-1:0] mantissa_col_0 [ARRAY_SIZE-1:0];
 
-    reg [MANTISSA_WIDTH-1:0] mantissa_row_0 [15:0];
-    reg [EXP_WIDTH-1:0] exponent_col_0 [15:0];
-    reg [EXP_WIDTH-1:0] exponent_row_0 [15:0];
-    reg valid_in_row_0[15:0];
-    reg valid_in_col_0[15:0];
-    reg last_in_row_0[15:0];
-    reg last_in_col_0[15:0];                 
-    wire [15:0] valid_out [15:0];
-    wire set_i_ready[15:0];
+    reg [MANTISSA_WIDTH-1:0] mantissa_row_0 [ARRAY_SIZE-1:0];
+    reg [EXP_WIDTH-1:0] exponent_col_0 [ARRAY_SIZE-1:0];
+    reg [EXP_WIDTH-1:0] exponent_row_0 [ARRAY_SIZE-1:0];
+    reg valid_in_row_0[ARRAY_SIZE-1:0];
+    reg valid_in_col_0[ARRAY_SIZE-1:0];
+    reg last_in_row_0[ARRAY_SIZE-1:0];
+    reg last_in_col_0[ARRAY_SIZE-1:0];                 
+    wire [ARRAY_SIZE-1:0] valid_out [ARRAY_SIZE-1:0];
+    wire set_i_ready[ARRAY_SIZE-1:0];
 
     wire [DATA_WIDTH-1:0] mantissa_out_1;
     wire [DATA_WIDTH-1:0] mantissa_out_2;
-    wire [7:0] exp_m_out_1;
-    wire [7:0] exp_m_out_2;
-    wire [7:0] exponent_out_1;
-    wire [7:0] exponent_out_2;
+    wire [EXP_WIDTH-1:0] exp_m_out_1;
+    wire [EXP_WIDTH-1:0] exp_m_out_2;
+    wire [EXP_WIDTH-1:0] exponent_out_1;
+    wire [EXP_WIDTH-1:0] exponent_out_2;
     wire valid_exp_out;
     wire valid_man_out;
-    wire [DATA_WIDTH-1:0] Res_out [15:0][15:0];
+    wire [DATA_WIDTH-1:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
     wire last_exp_sent;
     wire mantissas_sent_out;
     wire block_ready;
-    wire [4:0] scale_factor;
-    wire [7:0] max_exp;
-    wire [16*5 -1 :0] mantissa_out;
+    wire [SCALE_FACTOR_WIDTH-1:0] scale_factor;
+    wire [EXP_WIDTH-1:0] max_exp;
+    wire [ARRAY_SIZE*BLOCK_MANTISSA_WIDTH -1 :0] mantissa_out;
     wire max_exp_calculated;
 top_module #(
     .MANTISSA_WIDTH(16),
@@ -133,15 +137,15 @@ j = 0;
 
 end
 integer i, j;
-reg [4:0] k;
-reg [4:0] t[15:0]; // to keep track of which data to send for each column/row
+reg [LOG2_ARRAY_SIZE:0] k;
+reg [LOG2_ARRAY_SIZE:0] t[ARRAY_SIZE-1:0]; // to keep track of which data to send for each column/row
 //when set_i_ready is high for a column/row, we can send the next data for that column/row. We will use k to keep track of which data to send next for the current column/row. We will first fill the first column and row, then move to the next ones as set_i_ready signals are received.
 //introduce bubbles
 always @(posedge clk or negedge rst_n) begin
     if(!rst_n) begin
         k <= 0; // reset k on reset
     end else begin
-    if(k == 16) begin
+    if(k == (LOG2_ARRAY_SIZE+1)'(ARRAY_SIZE)) begin
         k <= k; // reset k after filling one column/row
     end else if(set_i_ready[0]) begin
         k <= k + 1; // move to next data for the current column/row
@@ -158,7 +162,7 @@ genvar set_idx;
 
 generate
 
-    for(set_idx = 0; set_idx < 16; set_idx = set_idx + 1) begin : set_input_logic
+    for(set_idx = 0; set_idx < ARRAY_SIZE; set_idx = set_idx + 1) begin : set_input_logic
         always @(posedge clk or negedge rst_n) begin
                 if(!rst_n) begin
                     mantissa_col_0[set_idx] <= 0;
@@ -169,29 +173,29 @@ generate
                     valid_in_col_0[set_idx] <= 0;
                     t[set_idx] <= 0; // reset data index for this column/row
                 end 
-                else if(set_idx ==0 && (set_i_ready[0] || t[set_idx] == 0) && t[set_idx] < 16) begin
-                        mantissa_col_0[set_idx] <= B[t[set_idx][3:0]][0]; // send first data for this column
+                else if(set_idx ==0 && (set_i_ready[0] || t[set_idx] == 0) && t[set_idx] < (LOG2_ARRAY_SIZE+1)'(ARRAY_SIZE)) begin
+                        mantissa_col_0[set_idx] <= B[4'(t[set_idx][LOG2_ARRAY_SIZE-1:0])][0]; // send first data for this column
                         exponent_col_0[set_idx] <= 8'h01; // example exponent
-                        mantissa_row_0[set_idx] <= A[0][t[set_idx][3:0]]; // send first data for this row
+                        mantissa_row_0[set_idx] <= A[0][4'(t[set_idx][LOG2_ARRAY_SIZE-1:0])]; // send first data for this row
                         exponent_row_0[set_idx] <= 8'h02; // example exponent
                         valid_in_row_0[set_idx] <= 1;    
                         valid_in_col_0[set_idx] <= 1;
                         t[set_idx] <= t[set_idx] + 1; // move to next data for this column/row
-                        if(t[set_idx] == 15) begin
+                        if(t[set_idx] == (LOG2_ARRAY_SIZE+1)'(ARRAY_SIZE - 1)) begin
                             last_in_row_0[set_idx] <= 1;    
                             last_in_col_0[set_idx] <= 1;
                         end
                     end
-                else if(set_i_ready[set_idx-1] && t[set_idx] < 16) begin
-                        mantissa_col_0[set_idx] <= B[t[set_idx][3:0]][set_idx];
+                else if(set_i_ready[set_idx-1] && t[set_idx] < (LOG2_ARRAY_SIZE+1)'(ARRAY_SIZE)) begin
+                        mantissa_col_0[set_idx] <= B[4'(t[set_idx][LOG2_ARRAY_SIZE-1:0])][set_idx];
                         exponent_col_0[set_idx] <= 8'h01; // example exponent
-                        mantissa_row_0[set_idx] <= A[set_idx][t[set_idx][3:0]];
+                        mantissa_row_0[set_idx] <= A[set_idx][4'(t[set_idx][LOG2_ARRAY_SIZE-1:0])];
                         exponent_row_0[set_idx] <= 8'h02; // example exponent
                         valid_in_row_0[set_idx] <= 1;    
                         valid_in_col_0[set_idx] <= 1;
                         t[set_idx] <= t[set_idx] + 1; // move to next data for this column/row
 
-                        if(t[set_idx] == 15) begin
+                        if(t[set_idx] == (LOG2_ARRAY_SIZE+1)'(ARRAY_SIZE - 1)) begin
                             last_in_row_0[set_idx] <= 1;    
                             last_in_col_0[set_idx] <= 1;
                         end
@@ -223,13 +227,13 @@ initial begin
 end
 
 always @(negedge clk) begin
-    if(k == 5'b10000 && t[15] == 5'b10000) $display("All data sent to PE.");
+    if(k == (LOG2_ARRAY_SIZE+1)'(ARRAY_SIZE) && t[ARRAY_SIZE-1] == (LOG2_ARRAY_SIZE+1)'(ARRAY_SIZE)) $display("All data sent to PE.");
 
     #100000;
     $display("Results processed.");
 
-    for(i = 0; i < 16; i = i + 1) begin
-        for(j = 0; j < 16; j = j + 1) begin
+    for(i = 0; i < ARRAY_SIZE; i = i + 1) begin
+        for(j = 0; j < ARRAY_SIZE; j = j + 1) begin
             $fwrite(fd, "Res_out[%0d][%0d] = %h; ", i, j, Res_out[i][j]);
         end
         $fwrite(fd, "\n");
@@ -241,7 +245,7 @@ end
 // vcd
 initial begin
     $dumpfile("TOP_1_tb.vcd");
-    $dumpvars(0, tb_TOP);
+    $dumpvars(0, tb_TOP_1);
 end
 
 endmodule

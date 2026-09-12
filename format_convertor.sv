@@ -2,32 +2,37 @@
 
 `timescale 1ns/1ps
 
-module format_convertor (
+module format_convertor #(
+    parameter ARRAY_SIZE = 4,
+    parameter BLOCK_MANTISSA_WIDTH = 5,
+    parameter EXP_WIDTH = 8,
+    parameter SCALE_FACTOR_WIDTH = 4
+)(
     input clk,
     input rst_n,
     input [31:0] mant0,
     input [31:0] mant1,
-    input [7:0] exp_m_1,
-    input [7:0] exp_m_2,
+    input [EXP_WIDTH-1:0] exp_m_1,
+    input [EXP_WIDTH-1:0] exp_m_2,
     input mantissa_valid,
     input all_mantissas_sent,
-    input [7:0] exp0,
-    input [7:0] exp1,
+    input [EXP_WIDTH-1:0] exp0,
+    input [EXP_WIDTH-1:0] exp1,
     input exp_valid,
     input last_exp_sent,
 
     
-    output [7:0] max_exp,
-    output [4:0] scale_factor,
-    output [16 * 5 - 1:0] mantissa_out,
+    output [EXP_WIDTH-1:0] max_exp,
+    output [SCALE_FACTOR_WIDTH-1:0] scale_factor,
+    output [ARRAY_SIZE * BLOCK_MANTISSA_WIDTH - 1:0] mantissa_out,
     output block_ready,
     output reg max_exp_calculated
 );
 
 reg state;
 // calc exp regs 
-reg  [7:0] max_exp_int;
-reg [3:0] idx;
+reg  [EXP_WIDTH-1:0] max_exp_int;
+reg [$clog2(ARRAY_SIZE)-1:0] idx;
 // find scale factor regs
 reg [31:0] max_mant_int;
 reg scale_factor_ready;
@@ -104,8 +109,8 @@ wire [31:0] shifted_mant1;
 wire [31:0] log_mant0;
 wire [31:0] log_mant1;
 
-wire [7:0] shift_exp0;
-wire [7:0] shift_exp1;
+wire [EXP_WIDTH-1:0] shift_exp0;
+wire [EXP_WIDTH-1:0] shift_exp1;
 
 assign shift_exp0 = max_exp - exp_m_1;
 assign shift_exp1 = max_exp - exp_m_2;
@@ -149,15 +154,15 @@ encoder_32_5 enc1(                      // Storing Exponent
     .outp(scale_factor_unb)
 );
 
-assign scale_factor = scale_factor_unb[4:0];
+assign scale_factor = scale_factor_unb[SCALE_FACTOR_WIDTH-1:0];
 
 genvar i;
 generate
-    for (i = 0; i < 16; i = i + 1) begin
+    for (i = 0; i < ARRAY_SIZE; i = i + 1) begin
         shifter_quantizer shq_i(
             .mant(mant_block[i]),
             .scale_factor(scale_factor),
-            .out(mantissa_out[5*i+:5])
+            .out(mantissa_out[BLOCK_MANTISSA_WIDTH*i+:BLOCK_MANTISSA_WIDTH])
         );
     end
 endgenerate

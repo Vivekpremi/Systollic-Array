@@ -1,12 +1,18 @@
 `timescale 1ns/1ps
 
-module iface(
+module iface#(
+    parameter ARRAY_SIZE = 4,
+    parameter LOG2_ARRAY_SIZE = $clog2(ARRAY_SIZE),
+    parameter BLOCK_MANTISSA_WIDTH = 5,
+    parameter EXP_WIDTH = 8,
+    parameter SCALE_FACTOR_WIDTH = 4
+)(
     input wire clk,
     input wire rst_n,
     input wire start,
-    input wire [15:0] valid_column [15:0],
-    input wire [31:0] mantissa[15:0][15:0],
-    input wire [7:0] exponent[15:0][15:0],
+    input wire [ARRAY_SIZE-1:0] valid_column [ARRAY_SIZE-1:0],
+    input wire [31:0] mantissa[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    input wire [7:0] exponent[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
     input wire max_exp_calculated,
 
     output wire valid_exp_out,      
@@ -39,8 +45,8 @@ reg valid_man_out_q;
 // SEND_MANTISSAS until all mantissas are sent
 
 reg [1:0] state;
-reg [3:0] col_idx; // To keep track of which column's mantissas are being sent
-reg [3:0] row_idx; // To keep track of which row's mantissas are being sent
+reg [$clog2(ARRAY_SIZE)-1:0] col_idx; // To keep track of which column's mantissas are being sent
+reg [$clog2(ARRAY_SIZE)-1:0] row_idx; // To keep track of which row's mantissas are being sent
 reg last_exp_sent_q;
 reg last_mantissa_sent;
 parameter WAIT_FOR_START = 2'b00,
@@ -75,7 +81,7 @@ always @(posedge clk or negedge rst_n) begin
             end
 
             SEND_EXPONENTS: begin
-                if(max_exp_calculated) begin
+                if(last_exp_sent_q) begin
                     state <= SEND_MANTISSAS;
                     row_idx <= 0; // Reset row index for mantissa sending
                     exp_out_1_q <= 0; // Clear exponent output
@@ -88,7 +94,7 @@ always @(posedge clk or negedge rst_n) begin
                         exp_out_1_q <= exponent[row_idx][col_idx]; // Send exponents one by one (for simplicity, sending the first one here)
                         exp_out_2_q <= exponent[row_idx + 1][col_idx]; // Send the second exponent
                         row_idx <= row_idx + 2; // Move to the next row
-                        last_exp_sent_q <= (row_idx == 14) ; // Set last_exp_sent when we've sent the last exponent
+                        last_exp_sent_q <= (row_idx == (LOG2_ARRAY_SIZE)'(ARRAY_SIZE - 2)); // Set last_exp_sent when we've sent the last exponent
                     end
                     else begin
                         valid_exp_out_q <= 0; // No valid exponent to send
@@ -106,7 +112,7 @@ always @(posedge clk or negedge rst_n) begin
                     exp_m_out_2_q <= exponent[row_idx + 1][col_idx];
                     valid_man_out_q <= 1;
                     row_idx <= row_idx + 2; // Move to the next two rows
-                    last_mantissa_sent <= (row_idx == 14); // Set last_mantissa_sent when we've sent the last pair of mantissas
+                    last_mantissa_sent <= (row_idx == (LOG2_ARRAY_SIZE)'(ARRAY_SIZE - 2)); // Set last_mantissa_sent when we've sent the last pair of mantissas
                     if(mantissas_sent_out) begin // If we've sent all mantissas for the current column
                         col_idx <= col_idx + 1; // Move to the next column
                         row_idx <= 0; // Reset row index for the new column
