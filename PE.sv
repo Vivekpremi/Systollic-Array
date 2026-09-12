@@ -1,35 +1,36 @@
 `timescale 1ns/1ps
 //`include "exponential_CORDIC.v"
 //PE of block floating point Systolic array
-module PE(
+module PE #(
+    parameter EXP_WIDTH = 8
+)(
     input wire clk,
     input wire rst_n,
     input wire valid_in,
     input wire [15:0] mantissa_col_i_j, 
-    input  wire [7:0] exponent_col_j,
+    input  wire [EXP_WIDTH-1:0] exponent_col_j,
     input wire [15:0] mantissa_row_i_j,
-    input wire [7:0] exponent_row_i,
+    input wire [EXP_WIDTH-1:0] exponent_row_i,
     input wire last_row_in,
     input wire last_col_in,
     
     output wire [15:0] mantissa_row_i_j_out,
     output wire last_out,
     output wire [15:0] mantissa_col_i_j_out,
-    output wire [7:0] exponent_col_j_out,
-    output wire [7:0] exponent_row_i_out,
+    output wire [EXP_WIDTH-1:0] exponent_col_j_out,
+    output wire [EXP_WIDTH-1:0] exponent_row_i_out,
     output wire [31:0] Res_out,
     output wire valid_out_row_i,
     output wire valid_out_col_j,
-    output wire demand_from_mem
+    output wire demand_from_mem,
+    output wire [EXP_WIDTH-1:0] exp_out
 );
 
 //exponent adder
-wire [7:0] exp_sum;
+wire [EXP_WIDTH-1:0] exp_sum;
 assign exp_sum = exponent_col_j + exponent_row_i;
 
-
-wire [7:0] exp_out ;
-wire [7:0] exp_out_d;
+wire [EXP_WIDTH-1:0] exp_out_d;
 assign exp_out_d =  exp_sum ;
 
 //mantissa adder
@@ -90,22 +91,30 @@ end
 reg [7:0] exp_out_q;
 reg [15:0] mantissa_col_i_j_out_q;
 reg [15:0] mantissa_row_i_j_out_q;
+reg [EXP_WIDTH-1:0] exponent_col_j_out_q;
+reg [EXP_WIDTH-1:0] exponent_row_i_out_q;
 
 always @(posedge clk or negedge rst_n) begin
 if(!rst_n) begin
     exp_out_q <= 0;
     mantissa_col_i_j_out_q <= 0;
     mantissa_row_i_j_out_q <= 0;
+    exponent_col_j_out_q <= 0;
+    exponent_row_i_out_q <= 0;
 
 end else if(valid_in) begin
     exp_out_q <= exp_out_d;
     mantissa_col_i_j_out_q <= mantissa_col_i_j;
     mantissa_row_i_j_out_q <= mantissa_row_i_j;
+    exponent_col_j_out_q <= exponent_col_j;
+    exponent_row_i_out_q <= exponent_row_i;
     end
     else begin
     exp_out_q <= exp_out_q;
     mantissa_col_i_j_out_q <= mantissa_col_i_j_out_q;
     mantissa_row_i_j_out_q <= mantissa_row_i_j_out_q;
+    exponent_col_j_out_q <= exponent_col_j_out_q;
+    exponent_row_i_out_q <= exponent_row_i_out_q;
     end
 end
 
@@ -113,8 +122,8 @@ end
 assign mantissa_row_i_j_out = mantissa_row_i_j_out_q;
 assign mantissa_col_i_j_out = mantissa_col_i_j_out_q;
 assign exp_out = exp_out_q;
-assign exponent_col_j_out = exp_out;
-assign exponent_row_i_out = exp_out;
+assign exponent_col_j_out = exponent_col_j_out_q;
+assign exponent_row_i_out = exponent_row_i_out_q;
 assign Res_out = accum;
 assign valid_out_row_i = accum_valid;
 assign valid_out_col_j = accum_valid;

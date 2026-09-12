@@ -69,14 +69,14 @@ PE PE_i_j (
     .valid_out_row_i(valid_out_row[i][j]),
     .valid_out_col_j(valid_out_col[i][j]),
     .last_out(last_out[i][j]),
-    .demand_from_mem(demand_from_mem[i]) 
+    .demand_from_mem(demand_from_mem[i]) ,
+    .exp_out(exp_out[i][j])
 );
 assign mantissa_col_i_j[i+1][j] = mantissa_col_i_j_out[i][j];
 assign exponent_col_j[i+1][j] = exponent_col_j_out[i][j];
 assign mantissa_row_i_j[i][j+1] = mantissa_row_i_j_out[i][j];
 assign exponent_row_i[i][j+1] = exponent_row_i_out[i][j];
 
-assign exp_out[i][j] = exponent_col_j_out[i][j]; // Output exponent from the column PE
 
 //assign valid_condition[i][j] = valid_out_row[i][j] && valid_out_col[i][j] && last_hori[i] && last_vert[j]; // Condition for output to be valid
 assign valid_out[i][j] = last_out[i][j]; // Output is valid when both row and column outputs are valid
