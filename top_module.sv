@@ -1,6 +1,15 @@
 
 `timescale 1ns/1ps
 
+//=============================================================================
+// top_module.sv  (edge_reg_bank integrated)
+//
+// edge_reg_bank is now the front door. Operands enter as one packed 32-bit
+// BLOCK per lane (mantissas[19:0] + scale[23:20] + exp[31:24]) plus per-lane
+// write-enables. The bank descales + demand-paces them into the systolic array
+// (set_i_ready from the array closes the demand loop). iface + format_convertor
+// are unchanged. The old already-descaled mantissa_*_0 inputs are removed.
+//=============================================================================
 module top_module #(
     parameter MANTISSA_WIDTH = 16,
     parameter EXP_WIDTH = 8,
@@ -8,21 +17,19 @@ module top_module #(
     parameter ARRAY_SIZE = 4,
     parameter LOG2_ARRAY_SIZE = $clog2(ARRAY_SIZE),
     parameter BLOCK_MANTISSA_WIDTH = 5,
-    parameter SCALE_FACTOR_WIDTH = 4
+    parameter SCALE_FACTOR_WIDTH = 4,
+    parameter BLOCK_WIDTH = EXP_WIDTH + SCALE_FACTOR_WIDTH + ARRAY_SIZE*BLOCK_MANTISSA_WIDTH // 32
 )(
     input wire clk,
     input wire rst_n,
-    input wire [MANTISSA_WIDTH-1:0] mantissa_col_0 [ARRAY_SIZE-1:0],
-    input wire [MANTISSA_WIDTH-1:0] mantissa_row_0 [ARRAY_SIZE-1:0],
-    input wire [EXP_WIDTH-1:0] exponent_col_0 [ARRAY_SIZE-1:0],
-    input wire [EXP_WIDTH-1:0] exponent_row_0 [ARRAY_SIZE-1:0],
-    input wire valid_in_row_0[ARRAY_SIZE-1:0],
-    input wire valid_in_col_0[ARRAY_SIZE-1:0],
-    input wire last_in_row_0[ARRAY_SIZE-1:0],
-    input wire last_in_col_0[ARRAY_SIZE-1:0],
-    input wire start,
-//    input wire max_exp_calculated,
 
+    // ---- operand input: one packed 32-bit BLOCK per lane + write-enable ----
+    input  wire                    row_we    [ARRAY_SIZE-1:0],
+    input  wire                    col_we    [ARRAY_SIZE-1:0],
+    input  wire [BLOCK_WIDTH-1:0]  row_block [ARRAY_SIZE-1:0],
+    input  wire [BLOCK_WIDTH-1:0]  col_block [ARRAY_SIZE-1:0],
+
+    // ---- observability / outputs (same as before) ----
     output wire [ARRAY_SIZE-1:0] valid_out [ARRAY_SIZE-1:0],
     output wire valid_exp_out,
     output wire [EXP_WIDTH-1:0] exponent_out_1,
@@ -41,26 +48,54 @@ module top_module #(
     output wire [SCALE_FACTOR_WIDTH-1:0] scale_factor,
     output wire [EXP_WIDTH-1:0] max_exp,
     output wire [ARRAY_SIZE*BLOCK_MANTISSA_WIDTH -1 :0] mantissa_out,
-    output wire max_exp_calculated
+    output wire max_exp_calculated,
+
+    // ---- bank status ----
+    output wire bank_primed
 );
-// // Block Storing Refisters
-// reg [31:0] block_col [15:0]; // 31:27(m1), 26:22(m2), 21:17(m3), 16:12(m4)
-// reg [31:0] block_row [15:0];
-// //Add Descalers
-// genvar i;
-// wire [4:0] mantissa_col_scaled [15:0];
-// wire [4:0] mantissa_row_scaled [15:0];
-// wire [3:0] scale_factor_col [15:0];
-// wire [3:0] scale_factor_row [15:0];
 
-// genvar j;
+// ---- bank <-> array edge wires (descaled operands the bank produces) ----
+wire [MANTISSA_WIDTH-1:0] mantissa_col_0 [ARRAY_SIZE-1:0];
+wire [MANTISSA_WIDTH-1:0] mantissa_row_0 [ARRAY_SIZE-1:0];
+wire [EXP_WIDTH-1:0]      exponent_col_0 [ARRAY_SIZE-1:0];
+wire [EXP_WIDTH-1:0]      exponent_row_0 [ARRAY_SIZE-1:0];
+wire                      valid_in_row_0 [ARRAY_SIZE-1:0];
+wire                      valid_in_col_0 [ARRAY_SIZE-1:0];
+wire                      last_in_row_0  [ARRAY_SIZE-1:0];
+wire                      last_in_col_0  [ARRAY_SIZE-1:0];
+wire [LOG2_ARRAY_SIZE-1:0] dbg_row_ptr [ARRAY_SIZE-1:0];
+wire [LOG2_ARRAY_SIZE-1:0] dbg_col_ptr [ARRAY_SIZE-1:0];
 
-// descaling descaler(
-//     .mant(),
-//     .inp_scale_factor(),
-//     .inp_pe()
-// );
+wire demand_from_mem [ARRAY_SIZE-1:0];
 
+// ---- edge register bank (front door) ----
+edge_reg_bank #(
+    .ARRAY_SIZE(ARRAY_SIZE),
+    .MANTISSA_WIDTH(MANTISSA_WIDTH),
+    .EXP_WIDTH(EXP_WIDTH),
+    .BLOCK_MANTISSA_WIDTH(BLOCK_MANTISSA_WIDTH),
+    .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
+)
+bank (
+    .clk(clk),
+    .rst_n(rst_n),
+    .row_we(row_we),
+    .col_we(col_we),
+    .row_block(row_block),
+    .col_block(col_block),
+    .set_i_ready(set_i_ready),
+    .mantissa_row_0(mantissa_row_0),
+    .mantissa_col_0(mantissa_col_0),
+    .exponent_row_0(exponent_row_0),
+    .exponent_col_0(exponent_col_0),
+    .valid_in_row_0(valid_in_row_0),
+    .valid_in_col_0(valid_in_col_0),
+    .last_in_row_0(last_in_row_0),
+    .last_in_col_0(last_in_col_0),
+    .bank_primed(bank_primed),
+    .dbg_row_ptr(dbg_row_ptr),
+    .dbg_col_ptr(dbg_col_ptr)
+);
 
 wire [EXP_WIDTH-1:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
 systolic_array #(
@@ -82,7 +117,8 @@ SA (
     .valid_out(valid_out),
     .last_in_row_0(last_in_row_0),
     .last_in_col_0(last_in_col_0),
-    .set_i_ready(set_i_ready)
+    .set_i_ready(set_i_ready),
+    .demand_from_mem(demand_from_mem)
 );
 
 reg [LOG2_ARRAY_SIZE-1:0] block_cnt;
@@ -94,10 +130,11 @@ always @(posedge clk or negedge rst_n) begin
     end
     else begin
         if(block_ready) begin
-            block_cnt <= (block_cnt == LOG2_ARRAY_SIZE'(ARRAY_SIZE-1)) ? 0 : block_cnt + 1; // Increment block count when block is ready, wrap around after ARRAY_SIZE-1
+            block_cnt <= (block_cnt == LOG2_ARRAY_SIZE'(ARRAY_SIZE-1)) ? 0 : block_cnt + 1;
         end
     end
 end
+
 iface iface(
     .clk(clk),
     .rst_n(rst_n),
@@ -119,8 +156,6 @@ iface iface(
     .last_exp_sent (last_exp_sent),
     .mantissas_sent_out (mantissas_sent_out)
 );
-
-
 
 format_convertor FC(
     .clk(clk),
@@ -144,6 +179,3 @@ format_convertor FC(
 );
 
 endmodule
-
-
-

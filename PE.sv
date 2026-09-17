@@ -59,9 +59,26 @@ anti_log (
     .valid_out(anti_log_valid),
     .exp_result(anti_log_fractional_part)
 );
-//shifter to multiply 2^ii to 2^.ff
+// Register the INTEGER part of the log (mantissa_sum[16:8]) at the cycle the
+// operand is latched by the CORDIC (valid_in). The CORDIC has multi-cycle
+// latency and the operand bus is gated to 0 between operands, so reading
+// mantissa_sum[16:8] combinationally at anti_log_valid time would see 0 and
+// drop the exponent. Operations can't overlap (demand_from_mem = anti_log_valid
+// gates the next operand on the current finishing), so a single held register
+// stays aligned with the in-flight antilog.
+reg [8:0] int_part_held;
+always @(posedge clk or negedge rst_n) begin
+    if(!rst_n)
+        int_part_held <= 0;
+    else if(valid_in)
+        int_part_held <= mantissa_sum[16:8];
+    else
+        int_part_held <= int_part_held;
+end
+
+//shifter to multiply 2^ii to 2^.ff  (uses the HELD integer part, not the live bus)
 wire [31:0] multiplication_result;
-assign multiplication_result = {21'b0,anti_log_fractional_part} << mantissa_sum[16:8];
+assign multiplication_result = {21'b0,anti_log_fractional_part} << int_part_held;
 
 
 //accumalator
