@@ -148,16 +148,23 @@ module round_2_power (
 endmodule
 
 
+// Expands a compressed two's-complement log mantissa back to the 16-bit 8.8
+// log-domain value the PE consumes.
+//
+// SIGNED: `mant` is TWO'S COMPLEMENT (the residual log L can be negative when
+// |v| < 2^E). It must be SIGN-extended, not zero-extended, and shifted
+// arithmetically -- zero-extending a negative mantissa silently produces a
+// large positive log (e.g. mant=-6, scale=3 would give +208 instead of -48).
 module descaling #(
-    parameter MANTISSA_WIDTH = 5,
+    parameter MANTISSA_WIDTH = 6,          // 6-bit two's complement (was 5 unsigned)
     parameter SCALE_FACTOR_WIDTH = 4
 )(
-    input [MANTISSA_WIDTH-1:0] mant,
-    input [SCALE_FACTOR_WIDTH-1:0] inp_scale_factor,
-    output [15:0] inp_pe
+    input  signed [MANTISSA_WIDTH-1:0] mant,
+    input         [SCALE_FACTOR_WIDTH-1:0] inp_scale_factor,
+    output signed [15:0] inp_pe
 );
 
-assign inp_pe = {11'b00000000000,mant} << inp_scale_factor;
-   
+assign inp_pe = $signed({{(16-MANTISSA_WIDTH){mant[MANTISSA_WIDTH-1]}}, mant}) <<< inp_scale_factor;
+
 endmodule
 

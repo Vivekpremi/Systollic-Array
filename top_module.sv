@@ -1,4 +1,3 @@
-
 `timescale 1ns/1ps
 
 //=============================================================================
@@ -16,9 +15,10 @@ module top_module #(
     parameter DATA_WIDTH = 32,
     parameter ARRAY_SIZE = 4,
     parameter LOG2_ARRAY_SIZE = $clog2(ARRAY_SIZE),
-    parameter BLOCK_MANTISSA_WIDTH = 5,
+    parameter BLOCK_MANTISSA_WIDTH = 6,   // INPUT block: residual log L, two's complement
+    parameter OUT_MANTISSA_WIDTH   = 5,   // OUTPUT block: format_convertor's mantissa (still unsigned)
     parameter SCALE_FACTOR_WIDTH = 4,
-    parameter BLOCK_WIDTH = EXP_WIDTH + SCALE_FACTOR_WIDTH + ARRAY_SIZE*BLOCK_MANTISSA_WIDTH // 32
+    parameter BLOCK_WIDTH = 64            // {E[8],scale[4],s_v[4],rsvd[24],L[24]}
 )(
     input wire clk,
     input wire rst_n,
@@ -41,24 +41,32 @@ module top_module #(
     output wire valid_man_out,
     output wire [1:0] iface_state_out,
     output wire set_i_ready[ARRAY_SIZE-1:0],
-    output wire [DATA_WIDTH-1:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    output wire signed [DATA_WIDTH-1:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
     output wire last_exp_sent,
     output wire mantissas_sent_out,
     output wire block_ready,
     output wire [SCALE_FACTOR_WIDTH-1:0] scale_factor,
     output wire [EXP_WIDTH-1:0] max_exp,
-    output wire [ARRAY_SIZE*BLOCK_MANTISSA_WIDTH -1 :0] mantissa_out,
+    output wire [ARRAY_SIZE*OUT_MANTISSA_WIDTH -1 :0] mantissa_out,
     output wire max_exp_calculated,
+
+    // ---- per-PE exponent, exposed so the testbench can CHECK the
+    //      hardware exponent path instead of trusting its own copy ----
+    output wire signed [EXP_WIDTH-1:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
 
     // ---- bank status ----
     output wire bank_primed
 );
 
 // ---- bank <-> array edge wires (descaled operands the bank produces) ----
-wire [MANTISSA_WIDTH-1:0] mantissa_col_0 [ARRAY_SIZE-1:0];
-wire [MANTISSA_WIDTH-1:0] mantissa_row_0 [ARRAY_SIZE-1:0];
-wire [EXP_WIDTH-1:0]      exponent_col_0 [ARRAY_SIZE-1:0];
-wire [EXP_WIDTH-1:0]      exponent_row_0 [ARRAY_SIZE-1:0];
+wire signed [MANTISSA_WIDTH-1:0] mantissa_col_0 [ARRAY_SIZE-1:0];
+wire signed [MANTISSA_WIDTH-1:0] mantissa_row_0 [ARRAY_SIZE-1:0];
+wire signed [EXP_WIDTH-1:0]      exponent_col_0 [ARRAY_SIZE-1:0];
+wire signed [EXP_WIDTH-1:0]      exponent_row_0 [ARRAY_SIZE-1:0];
+wire                      sign_col_0     [ARRAY_SIZE-1:0];
+wire                      sign_row_0     [ARRAY_SIZE-1:0];
+wire                      zero_col_0     [ARRAY_SIZE-1:0];
+wire                      zero_row_0     [ARRAY_SIZE-1:0];
 wire                      valid_in_row_0 [ARRAY_SIZE-1:0];
 wire                      valid_in_col_0 [ARRAY_SIZE-1:0];
 wire                      last_in_row_0  [ARRAY_SIZE-1:0];
@@ -88,6 +96,10 @@ bank (
     .mantissa_col_0(mantissa_col_0),
     .exponent_row_0(exponent_row_0),
     .exponent_col_0(exponent_col_0),
+    .sign_row_0(sign_row_0),
+    .sign_col_0(sign_col_0),
+    .zero_row_0(zero_row_0),
+    .zero_col_0(zero_col_0),
     .valid_in_row_0(valid_in_row_0),
     .valid_in_col_0(valid_in_col_0),
     .last_in_row_0(last_in_row_0),
@@ -97,7 +109,6 @@ bank (
     .dbg_col_ptr(dbg_col_ptr)
 );
 
-wire [EXP_WIDTH-1:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
 systolic_array #(
     .DATA_WIDTH(DATA_WIDTH),
     .EXP_WIDTH(EXP_WIDTH),
@@ -110,6 +121,10 @@ SA (
     .mantissa_row_0(mantissa_row_0),
     .exponent_col_0(exponent_col_0),
     .exponent_row_0(exponent_row_0),
+    .sign_col_0(sign_col_0),
+    .sign_row_0(sign_row_0),
+    .zero_col_0(zero_col_0),
+    .zero_row_0(zero_row_0),
     .valid_in_row_0(valid_in_row_0),
     .valid_in_col_0(valid_in_col_0),
     .exp_out(exp_out),
@@ -179,3 +194,4 @@ format_convertor FC(
 );
 
 endmodule
+

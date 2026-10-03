@@ -8,16 +8,20 @@ module systolic_array #(
 (
     input wire clk,
     input wire rst_n,
-    input wire [MANTISSA_WIDTH-1:0] mantissa_col_0 [ARRAY_SIZE-1:0],
-    input wire [MANTISSA_WIDTH-1:0] mantissa_row_0 [ARRAY_SIZE-1:0],
-    input wire [EXP_WIDTH-1:0] exponent_col_0 [ARRAY_SIZE-1:0],
-    input wire [EXP_WIDTH-1:0] exponent_row_0 [ARRAY_SIZE-1:0],
+    input wire signed [MANTISSA_WIDTH-1:0] mantissa_col_0 [ARRAY_SIZE-1:0],
+    input wire signed [MANTISSA_WIDTH-1:0] mantissa_row_0 [ARRAY_SIZE-1:0],
+    input wire signed [EXP_WIDTH-1:0] exponent_col_0 [ARRAY_SIZE-1:0],
+    input wire signed [EXP_WIDTH-1:0] exponent_row_0 [ARRAY_SIZE-1:0],
+    input wire sign_col_0 [ARRAY_SIZE-1:0],
+    input wire sign_row_0 [ARRAY_SIZE-1:0],
+    input wire zero_col_0 [ARRAY_SIZE-1:0],
+    input wire zero_row_0 [ARRAY_SIZE-1:0],
     input wire valid_in_row_0[ARRAY_SIZE-1:0],
     input wire valid_in_col_0[ARRAY_SIZE-1:0],
     input wire last_in_row_0[ARRAY_SIZE-1:0],
     input wire last_in_col_0[ARRAY_SIZE-1:0],
 
-    output wire [DATA_WIDTH-1:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    output wire signed [DATA_WIDTH-1:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
     output wire [7:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
     output wire [ARRAY_SIZE-1:0] valid_out[ARRAY_SIZE-1:0],
     output wire set_i_ready[ARRAY_SIZE-1:0],
@@ -25,14 +29,24 @@ module systolic_array #(
 );
 //16 X 16 systolic array using genvar
 genvar i, j;
-    wire [MANTISSA_WIDTH-1:0] mantissa_col_i_j [ARRAY_SIZE:0][ARRAY_SIZE:0];
-    wire [MANTISSA_WIDTH-1:0] mantissa_row_i_j [ARRAY_SIZE:0][ARRAY_SIZE:0];
-    wire [MANTISSA_WIDTH-1:0] mantissa_col_i_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
-    wire [MANTISSA_WIDTH-1:0] mantissa_row_i_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
-    wire [EXP_WIDTH-1:0] exponent_col_j [ARRAY_SIZE:0][ARRAY_SIZE:0];
-    wire [EXP_WIDTH-1:0] exponent_row_i [ARRAY_SIZE:0][ARRAY_SIZE:0];
-    wire [EXP_WIDTH-1:0] exponent_col_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
-    wire [EXP_WIDTH-1:0] exponent_row_i_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire signed [MANTISSA_WIDTH-1:0] mantissa_col_i_j [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire signed [MANTISSA_WIDTH-1:0] mantissa_row_i_j [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire signed [MANTISSA_WIDTH-1:0] mantissa_col_i_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire signed [MANTISSA_WIDTH-1:0] mantissa_row_i_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire signed [EXP_WIDTH-1:0] exponent_col_j [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire signed [EXP_WIDTH-1:0] exponent_row_i [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire signed [EXP_WIDTH-1:0] exponent_col_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire signed [EXP_WIDTH-1:0] exponent_row_i_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    // VALUE-sign mesh, propagates exactly like the mantissa/exponent meshes
+    wire sign_col_i_j     [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire sign_row_i_j     [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire sign_col_i_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire sign_row_i_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    // ZERO-flag mesh, propagates exactly like the sign mesh
+    wire zero_col_i_j     [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire zero_row_i_j     [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire zero_col_i_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
+    wire zero_row_i_j_out [ARRAY_SIZE:0][ARRAY_SIZE:0];
   
     wire valid_in_row[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
     wire valid_in_col[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
@@ -59,12 +73,20 @@ PE PE_i_j (
     .exponent_col_j(exponent_col_j[i][j]),
     .mantissa_row_i_j(mantissa_row_i_j[i][j]),
     .exponent_row_i(exponent_row_i[i][j]),
+    .sign_col_i_j(sign_col_i_j[i][j]),
+    .sign_row_i_j(sign_row_i_j[i][j]),
+    .zero_col_i_j(zero_col_i_j[i][j]),
+    .zero_row_i_j(zero_row_i_j[i][j]),
     .last_row_in(last_row_in[i][j]),
     .last_col_in(last_col_in[i][j]),
     .mantissa_row_i_j_out(mantissa_row_i_j_out[i][j]),
     .mantissa_col_i_j_out(mantissa_col_i_j_out[i][j]),
     .exponent_col_j_out(exponent_col_j_out[i][j]),
     .exponent_row_i_out(exponent_row_i_out[i][j]),
+    .sign_col_i_j_out(sign_col_i_j_out[i][j]),
+    .sign_row_i_j_out(sign_row_i_j_out[i][j]),
+    .zero_col_i_j_out(zero_col_i_j_out[i][j]),
+    .zero_row_i_j_out(zero_row_i_j_out[i][j]),
     .Res_out(Res_out[i][j]),
     .valid_out_row_i(valid_out_row[i][j]),
     .valid_out_col_j(valid_out_col[i][j]),
@@ -76,6 +98,10 @@ assign mantissa_col_i_j[i+1][j] = mantissa_col_i_j_out[i][j];
 assign exponent_col_j[i+1][j] = exponent_col_j_out[i][j];
 assign mantissa_row_i_j[i][j+1] = mantissa_row_i_j_out[i][j];
 assign exponent_row_i[i][j+1] = exponent_row_i_out[i][j];
+assign sign_col_i_j[i+1][j] = sign_col_i_j_out[i][j];
+assign sign_row_i_j[i][j+1] = sign_row_i_j_out[i][j];
+assign zero_col_i_j[i+1][j] = zero_col_i_j_out[i][j];
+assign zero_row_i_j[i][j+1] = zero_row_i_j_out[i][j];
 
 
 //assign valid_condition[i][j] = valid_out_row[i][j] && valid_out_col[i][j] && last_hori[i] && last_vert[j]; // Condition for output to be valid
@@ -107,6 +133,10 @@ assign valid_in_row[i][0] = valid_in_row_0[i];
 assign valid_in_col[0][i] = valid_in_col_0[i]; 
 
 
+assign sign_col_i_j[0][i]     = (valid_in_col[0][i])? sign_col_0[i] : 1'b0;
+assign sign_row_i_j[i][0]     = (valid_in_row[i][0])? sign_row_0[i] : 1'b0;
+assign zero_col_i_j[0][i]     = (valid_in_col[0][i])? zero_col_0[i] : 1'b0;
+assign zero_row_i_j[i][0]     = (valid_in_row[i][0])? zero_row_0[i] : 1'b0;
 assign mantissa_col_i_j[0][i] = (valid_in_col[0][i])? mantissa_col_0[i] : 0;
 assign exponent_col_j[0][i] = (valid_in_col[0][i])? exponent_col_0[i] : 0;
 assign mantissa_row_i_j[i][0] = (valid_in_row[i][0])? mantissa_row_0[i] : 0;
