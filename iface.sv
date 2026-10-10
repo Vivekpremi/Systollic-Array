@@ -1,6 +1,14 @@
 `timescale 1ns/1ps
 
+// PARAMETER CONSTRAINT: ARRAY_SIZE must be >= 4 and EVEN.
+// This FSM sends exponents and mantissas in PAIRS -- it reads
+// exponent[row_idx+1] / valid_column[row_idx+1] and advances row_idx by 2.
+// At ARRAY_SIZE=2, row_idx is 1 bit and `row_idx + 2` does not fit (Verilator
+// reports WIDTHTRUNC), and row_idx+1 would index past the array. Widening
+// row_idx would silence the warning while leaving the pairing broken, so the
+// constraint is documented instead of papered over.
 module iface#(
+    parameter DATA_WIDTH = 32,
     parameter ARRAY_SIZE = 4,
     parameter LOG2_ARRAY_SIZE = $clog2(ARRAY_SIZE),
     parameter BLOCK_MANTISSA_WIDTH = 5,
@@ -11,15 +19,15 @@ module iface#(
     input wire rst_n,
     input wire start,
     input wire [ARRAY_SIZE-1:0] valid_column [ARRAY_SIZE-1:0],
-    input wire [31:0] mantissa[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
-    input wire [7:0] exponent[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    input wire signed [DATA_WIDTH:0] mantissa[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    input wire signed [EXP_WIDTH-1:0] exponent[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
     input wire max_exp_calculated,
 
     output wire valid_exp_out,      
-    output wire [7:0] exp_out_1,
-    output wire [7:0] exp_out_2,      
-    output wire [31:0] mantissa_out_1,mantissa_out_2,
-    output wire [7:0]  exp_m_out_1, exp_m_out_2,
+    output wire signed [EXP_WIDTH-1:0] exp_out_1,
+    output wire signed [EXP_WIDTH-1:0] exp_out_2,      
+    output wire signed [DATA_WIDTH:0] mantissa_out_1,mantissa_out_2,
+    output wire signed [EXP_WIDTH-1:0]  exp_m_out_1, exp_m_out_2,
     output wire valid_man_out,
     output wire [1:0] state_out,
     output wire last_exp_sent,
@@ -29,9 +37,9 @@ module iface#(
 genvar i,j;
 
 reg  valid_exp_out_q;
-reg [7:0] exp_out_1_q, exp_out_2_q;
-reg [31:0] mantissa_out_1_q,mantissa_out_2_q;
-reg [7:0]  exp_m_out_1_q, exp_m_out_2_q;
+reg signed [EXP_WIDTH-1:0] exp_out_1_q, exp_out_2_q;
+reg signed [DATA_WIDTH:0] mantissa_out_1_q,mantissa_out_2_q;
+reg signed [EXP_WIDTH-1:0]  exp_m_out_1_q, exp_m_out_2_q;
 reg valid_man_out_q;
 
 //FSM to control the flow of data
@@ -141,3 +149,4 @@ assign state_out = state;
 assign last_exp_sent = last_exp_sent_q;
 assign mantissas_sent_out = last_mantissa_sent;
 endmodule
+

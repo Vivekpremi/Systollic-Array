@@ -1,5 +1,13 @@
 `timescale 1ns/1ps
 
+// PARAMETER CONSTRAINT: Frac_WIDTH must be 8.
+// The e[] table below holds 8 LITERAL constants -- the shift-and-add encodings
+// of e^(2^-k) for k=0..7 -- and the array is declared [0:Frac_WIDTH-1]. Any
+// other Frac_WIDTH fails elaboration ("Assignment pattern missed initializing
+// elements"), which is the right behaviour: supporting more iterations needs
+// NEW constants computed for them, not just a resized array. Note also that
+// e[7] is 9'b000_000_000, a no-op: the 3-bit shift field cannot encode 2^-8,
+// so iteration 7 contributes nothing (-0.39% when it fires).
 module exponential_CORDIC #(
 parameter Int_WIDTH = 9, // Integer width
 parameter Frac_WIDTH = 8,  // Fractional width 

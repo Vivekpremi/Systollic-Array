@@ -21,11 +21,22 @@
 // shared scale factor).
 //=============================================================================
 module tb_TOP_1;
-    parameter DATA_WIDTH=32, EXP_WIDTH=8, MANTISSA_WIDTH=16, ARRAY_SIZE=4;
-    parameter BLOCK_MANTISSA_WIDTH=5, SCALE_FACTOR_WIDTH=4;
+    parameter DATA_WIDTH=32, EXP_WIDTH=8, MANTISSA_WIDTH=16, FRAC_WIDTH=8, ARRAY_SIZE=4;
+    parameter BLOCK_MANTISSA_WIDTH = 6, SCALE_FACTOR_WIDTH=4;
+    parameter OUT_MANTISSA_WIDTH = 5;   // `parameter`, not localparam: the OM knob
+                                        // reaches it through -GOUT_MANTISSA_WIDTH
     localparam MBW = ARRAY_SIZE*BLOCK_MANTISSA_WIDTH;   // 24 (input block L field)
-    localparam OMW = ARRAY_SIZE*5;                      // 20 (format_convertor output)
-    localparam BW  = 64;
+    localparam OMW = ARRAY_SIZE*OUT_MANTISSA_WIDTH;     // 20 (format_convertor output)
+    localparam BLOCK_BITS = MBW + 2*ARRAY_SIZE + SCALE_FACTOR_WIDTH + EXP_WIDTH;
+    localparam BW  = ((BLOCK_BITS + 7)/8)*8;
+    localparam MANT_LSB  = 0;
+    localparam ZERO_LSB  = MANT_LSB  + MBW;
+    localparam SIGN_LSB  = ZERO_LSB  + ARRAY_SIZE;
+    localparam SCALE_LSB = SIGN_LSB  + ARRAY_SIZE;
+    localparam EXP_LSB   = SCALE_LSB + SCALE_FACTOR_WIDTH;
+    localparam LMAX =  (1<<(BLOCK_MANTISSA_WIDTH-1)) - 1;
+    localparam LMIN = -(1<<(BLOCK_MANTISSA_WIDTH-1));
+    localparam LOG_ONE = (1<<FRAC_WIDTH);           // 1.0 in the log fixed point
 
     reg clk, rst_n;
     reg row_we [ARRAY_SIZE-1:0], col_we [ARRAY_SIZE-1:0];
@@ -35,15 +46,24 @@ module tb_TOP_1;
     wire valid_exp_out, valid_man_out, last_exp_sent, mantissas_sent_out;
     wire block_ready, max_exp_calculated, bank_primed;
     wire [EXP_WIDTH-1:0] exponent_out_1, exponent_out_2, exp_m_out_1, exp_m_out_2, max_exp;
-    wire [DATA_WIDTH-1:0] mantissa_out_1, mantissa_out_2;
+    wire signed [DATA_WIDTH:0] mantissa_out_1, mantissa_out_2;
     wire [1:0] iface_state_out;
     wire set_i_ready [ARRAY_SIZE-1:0];
-    wire [DATA_WIDTH-1:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
+    wire signed [DATA_WIDTH:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
     wire [SCALE_FACTOR_WIDTH-1:0] scale_factor;
     wire [OMW-1:0] mantissa_out;
     wire signed [EXP_WIDTH-1:0] exp_out_hw [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];   // per-PE exponent from HW
 
-    top_module #(.MANTISSA_WIDTH(16), .EXP_WIDTH(8), .DATA_WIDTH(32)) uut (
+    top_module #(
+        .MANTISSA_WIDTH       (MANTISSA_WIDTH),
+        .FRAC_WIDTH           (FRAC_WIDTH),
+        .EXP_WIDTH            (EXP_WIDTH),
+        .DATA_WIDTH           (DATA_WIDTH),
+        .ARRAY_SIZE           (ARRAY_SIZE),
+        .BLOCK_MANTISSA_WIDTH (BLOCK_MANTISSA_WIDTH),
+        .OUT_MANTISSA_WIDTH   (OUT_MANTISSA_WIDTH),
+        .SCALE_FACTOR_WIDTH   (SCALE_FACTOR_WIDTH)
+    ) uut (
         .clk(clk), .rst_n(rst_n),
         .row_we(row_we), .col_we(col_we), .row_block(row_block), .col_block(col_block),
         .valid_out(valid_out), .valid_exp_out(valid_exp_out),
@@ -79,7 +99,7 @@ module tb_TOP_1;
         real l;
         begin
             if (v <= 0.0) log8p8 = 0;
-            else begin l = $ln(v)/$ln(2.0); log8p8 = $rtoi(l*256.0 + ((l<0.0)?-0.5:0.5)); end
+            else begin l = $ln(v)/$ln(2.0); log8p8 = $rtoi(l*$itor(LOG_ONE) + ((l<0.0)?-0.5:0.5)); end
         end
     endfunction
 
@@ -100,10 +120,10 @@ module tb_TOP_1;
             for (s=0; s<16; s=s+1) begin
                 m0=sdiv_round(l0,s); m1=sdiv_round(l1,s);
                 m2=sdiv_round(l2,s); m3=sdiv_round(l3,s);
-                if ( (!act[0] || (m0>=-32 && m0<=31)) &&
-                     (!act[1] || (m1>=-32 && m1<=31)) &&
-                     (!act[2] || (m2>=-32 && m2<=31)) &&
-                     (!act[3] || (m3>=-32 && m3<=31)) && pick_scale_m==15)
+                if ( (!act[0] || (m0>=LMIN && m0<=LMAX)) &&
+                     (!act[1] || (m1>=LMIN && m1<=LMAX)) &&
+                     (!act[2] || (m2>=LMIN && m2<=LMAX)) &&
+                     (!act[3] || (m3>=LMIN && m3<=LMAX)) && pick_scale_m==15)
                     pick_scale_m = s;
             end
         end
@@ -116,8 +136,8 @@ module tb_TOP_1;
             for (s=0; s<16; s=s+1) begin
                 m0=sdiv_round(l0,s); m1=sdiv_round(l1,s);
                 m2=sdiv_round(l2,s); m3=sdiv_round(l3,s);
-                if (m0>=-32 && m0<=31 && m1>=-32 && m1<=31 &&
-                    m2>=-32 && m2<=31 && m3>=-32 && m3<=31 && pick_scale==15)
+                if (m0>=LMIN && m0<=LMAX && m1>=LMIN && m1<=LMAX &&
+                    m2>=LMIN && m2<=LMAX && m3>=LMIN && m3<=LMAX && pick_scale==15)
                     pick_scale = s;
             end
         end
@@ -153,27 +173,32 @@ module tb_TOP_1;
             E = calc_E(v0,v1,v2,v3);
             // residual logs
             // zero elements get a dummy L of 0; the z flag is what matters
-            l0 = zf[0] ? 0 : (log8p8(absr(v0)) - E*256);
-            l1 = zf[1] ? 0 : (log8p8(absr(v1)) - E*256);
-            l2 = zf[2] ? 0 : (log8p8(absr(v2)) - E*256);
-            l3 = zf[3] ? 0 : (log8p8(absr(v3)) - E*256);
+            l0 = zf[0] ? 0 : (log8p8(absr(v0)) - E*LOG_ONE);
+            l1 = zf[1] ? 0 : (log8p8(absr(v1)) - E*LOG_ONE);
+            l2 = zf[2] ? 0 : (log8p8(absr(v2)) - E*LOG_ONE);
+            l3 = zf[3] ? 0 : (log8p8(absr(v3)) - E*LOG_ONE);
             s  = pick_scale_m(l0,l1,l2,l3, ~zf);   // zeros excluded from the fit
             m0=sdiv_round(l0,s); m1=sdiv_round(l1,s);
             m2=sdiv_round(l2,s); m3=sdiv_round(l3,s);
-            make_block = 64'b0;
-            make_block[23:0]  = { m3[5:0], m2[5:0], m1[5:0], m0[5:0] };
-            make_block[47:44] = zf;          // zero flags
-            make_block[51:48] = sv;
-            make_block[55:52] = s[3:0];
-            make_block[63:56] = E[7:0];       // signed, two's complement
+            make_block = '0;
+            make_block[MANT_LSB + 0*BLOCK_MANTISSA_WIDTH +: BLOCK_MANTISSA_WIDTH] = m0[BLOCK_MANTISSA_WIDTH-1:0];
+            make_block[MANT_LSB + 1*BLOCK_MANTISSA_WIDTH +: BLOCK_MANTISSA_WIDTH] = m1[BLOCK_MANTISSA_WIDTH-1:0];
+            make_block[MANT_LSB + 2*BLOCK_MANTISSA_WIDTH +: BLOCK_MANTISSA_WIDTH] = m2[BLOCK_MANTISSA_WIDTH-1:0];
+            make_block[MANT_LSB + 3*BLOCK_MANTISSA_WIDTH +: BLOCK_MANTISSA_WIDTH] = m3[BLOCK_MANTISSA_WIDTH-1:0];
+            make_block[ZERO_LSB  +: ARRAY_SIZE] = zf;          // zero flags
+            make_block[SIGN_LSB  +: ARRAY_SIZE] = sv;
+            make_block[SCALE_LSB +: SCALE_FACTOR_WIDTH] = s[SCALE_FACTOR_WIDTH-1:0];
+            make_block[EXP_LSB   +: EXP_WIDTH] = E[EXP_WIDTH-1:0];       // signed, two's complement
         end
     endfunction
 
     task clrwe; integer w; begin for(w=0;w<4;w=w+1) begin row_we[w]=0; col_we[w]=0; end end endtask
 
     // ---------------- one test: reset, load, multiply, check ----------------
-    task run_test(input integer id, input [8*44:1] name,
-                  input [EXP_WIDTH-1:0] erow, input [EXP_WIDTH-1:0] ecol);
+    // NOTE: erow/ecol used to be arguments here and were never referenced in
+    // the body. They were fed 8'hNN literals at all 26 call sites, which made
+    // -GEXP_WIDTH=12 fail to build (8-bit const into a 12-bit arg). Removed.
+    task run_test(input integer id, input [8*44:1] name);
         real tot_err, a, e, d, sacc, cnd, wcond, tm;
         integer bad, sflip;
         string bad_str;
@@ -195,8 +220,8 @@ module tb_TOP_1;
                 E_row[i]     = calc_E(Afp[i][0],Afp[i][1],Afp[i][2],Afp[i][3]);
                 E_col[i]     = calc_E(Bfp[0][i],Bfp[1][i],Bfp[2][i],Bfp[3][i]);
             end
-            sf_row = row_block[0][55:52];
-            sf_col = col_block[0][55:52];
+            sf_row = row_block[0][SCALE_LSB +: SCALE_FACTOR_WIDTH];
+            sf_col = col_block[0][SCALE_LSB +: SCALE_FACTOR_WIDTH];
             for(i=0;i<4;i=i+1) begin row_we[i]=1; col_we[i]=1; end
             @(posedge clk); clrwe;
             if(!bank_primed) $display("  WARN: bank_primed low after load");
@@ -206,7 +231,7 @@ module tb_TOP_1;
             tot_err=0.0; bad=0; bad_str="";
             wcond=0.0; sflip=0; t_experr=0;
             for(i=0;i<4;i=i+1) for(j=0;j<4;j=j+1) begin
-                a = ($itor($signed(Res_out[i][j]))/256.0)*(2.0**(E_row[i]+E_col[j]));
+                a = ($itor($signed(Res_out[i][j]))/$itor(LOG_ONE))*(2.0**(E_row[i]+E_col[j]));
                 e = Cexp[i][j];
                 d = (a>e)?(a-e):(e-a);
                 got_m[i][j]=a; abserr[i][j]=d;
@@ -351,7 +376,7 @@ module tb_TOP_1;
 
             wc=0.0; sf=0; t_experr=0;
             for(i2=0;i2<4;i2=i2+1) for(j2=0;j2<4;j2=j2+1) begin
-                a = ($itor($signed(Res_out[i2][j2]))/256.0)*(2.0**(E_row[i2]+E_col[j2]));
+                a = ($itor($signed(Res_out[i2][j2]))/$itor(LOG_ONE))*(2.0**(E_row[i2]+E_col[j2]));
                 e = Cexp[i2][j2];
                 d = (a>e)?(a-e):(e-a);
                 got_m[i2][j2]  = a;
@@ -414,7 +439,7 @@ module tb_TOP_1;
         Bfp[1][0]=1.00; Bfp[1][1]=1.00; Bfp[1][2]=1.00; Bfp[1][3]=1.00;
         Bfp[2][0]=1.00; Bfp[2][1]=1.00; Bfp[2][2]=1.00; Bfp[2][3]=1.00;
         Bfp[3][0]=1.00; Bfp[3][1]=1.00; Bfp[3][2]=1.00; Bfp[3][3]=1.00;
-        run_test(1, "all ones", 8'h00, 8'h00);
+        run_test(1, "all ones");
 
         // ---------------- T2: all twos ----------------
         Afp[0][0]=2.00; Afp[0][1]=2.00; Afp[0][2]=2.00; Afp[0][3]=2.00;
@@ -425,7 +450,7 @@ module tb_TOP_1;
         Bfp[1][0]=2.00; Bfp[1][1]=2.00; Bfp[1][2]=2.00; Bfp[1][3]=2.00;
         Bfp[2][0]=2.00; Bfp[2][1]=2.00; Bfp[2][2]=2.00; Bfp[2][3]=2.00;
         Bfp[3][0]=2.00; Bfp[3][1]=2.00; Bfp[3][2]=2.00; Bfp[3][3]=2.00;
-        run_test(2, "all twos", 8'h01, 8'h02);
+        run_test(2, "all twos");
 
         // ---------------- T3: powers of two ----------------
         Afp[0][0]=2.00; Afp[0][1]=4.00; Afp[0][2]=8.00; Afp[0][3]=16.00;
@@ -436,7 +461,7 @@ module tb_TOP_1;
         Bfp[1][0]=16.00; Bfp[1][1]=4.00; Bfp[1][2]=8.00; Bfp[1][3]=2.00;
         Bfp[2][0]=4.00; Bfp[2][1]=2.00; Bfp[2][2]=16.00; Bfp[2][3]=8.00;
         Bfp[3][0]=8.00; Bfp[3][1]=16.00; Bfp[3][2]=2.00; Bfp[3][3]=4.00;
-        run_test(3, "powers of two", 8'h03, 8'h04);
+        run_test(3, "powers of two");
 
         // ---------------- T4: small integers ----------------
         Afp[0][0]=1.00; Afp[0][1]=2.00; Afp[0][2]=3.00; Afp[0][3]=4.00;
@@ -447,7 +472,7 @@ module tb_TOP_1;
         Bfp[1][0]=2.00; Bfp[1][1]=1.00; Bfp[1][2]=4.00; Bfp[1][3]=3.00;
         Bfp[2][0]=4.00; Bfp[2][1]=2.00; Bfp[2][2]=3.00; Bfp[2][3]=1.00;
         Bfp[3][0]=3.00; Bfp[3][1]=4.00; Bfp[3][2]=1.00; Bfp[3][3]=2.00;
-        run_test(4, "small integers", 8'h05, 8'h06);
+        run_test(4, "small integers");
 
         // ---------------- T5: near-1 tight ----------------
         Afp[0][0]=1.10; Afp[0][1]=1.20; Afp[0][2]=1.30; Afp[0][3]=1.40;
@@ -458,7 +483,7 @@ module tb_TOP_1;
         Bfp[1][0]=1.42; Bfp[1][1]=1.32; Bfp[1][2]=1.22; Bfp[1][3]=1.12;
         Bfp[2][0]=1.18; Bfp[2][1]=1.28; Bfp[2][2]=1.38; Bfp[2][3]=1.48;
         Bfp[3][0]=1.48; Bfp[3][1]=1.38; Bfp[3][2]=1.28; Bfp[3][3]=1.18;
-        run_test(5, "near-1 tight", 8'h10, 8'h11);
+        run_test(5, "near-1 tight");
 
         // ---------------- T6: near-1 mixed ----------------
         Afp[0][0]=1.48; Afp[0][1]=1.61; Afp[0][2]=1.19; Afp[0][3]=1.83;
@@ -469,7 +494,7 @@ module tb_TOP_1;
         Bfp[1][0]=1.83; Bfp[1][1]=1.19; Bfp[1][2]=1.61; Bfp[1][3]=1.48;
         Bfp[2][0]=1.27; Bfp[2][1]=1.94; Bfp[2][2]=1.05; Bfp[2][3]=1.72;
         Bfp[3][0]=1.72; Bfp[3][1]=1.05; Bfp[3][2]=1.94; Bfp[3][3]=1.27;
-        run_test(6, "near-1 mixed", 8'h12, 8'h13);
+        run_test(6, "near-1 mixed");
 
         // ---------------- T7: near-1 all unique ----------------
         Afp[0][0]=1.03; Afp[0][1]=1.09; Afp[0][2]=1.17; Afp[0][3]=1.23;
@@ -480,7 +505,7 @@ module tb_TOP_1;
         Bfp[1][0]=1.72; Bfp[1][1]=1.66; Bfp[1][2]=1.58; Bfp[1][3]=1.52;
         Bfp[2][0]=1.46; Bfp[2][1]=1.38; Bfp[2][2]=1.32; Bfp[2][3]=1.26;
         Bfp[3][0]=1.18; Bfp[3][1]=1.12; Bfp[3][2]=1.06; Bfp[3][3]=1.02;
-        run_test(7, "near-1 all unique", 8'h14, 8'h15);
+        run_test(7, "near-1 all unique");
 
         // ---------------- T8: near-1 interleaved ----------------
         Afp[0][0]=1.07; Afp[0][1]=1.93; Afp[0][2]=1.21; Afp[0][3]=1.77;
@@ -491,7 +516,7 @@ module tb_TOP_1;
         Bfp[1][0]=1.27; Bfp[1][1]=1.75; Bfp[1][2]=1.39; Bfp[1][3]=1.63;
         Bfp[2][0]=1.95; Bfp[2][1]=1.17; Bfp[2][2]=1.61; Bfp[2][3]=1.45;
         Bfp[3][0]=1.09; Bfp[3][1]=1.87; Bfp[3][2]=1.23; Bfp[3][3]=1.71;
-        run_test(8, "near-1 interleaved", 8'h16, 8'h17);
+        run_test(8, "near-1 interleaved");
 
         // ---------------- T9: near-1 extremes ----------------
         Afp[0][0]=1.01; Afp[0][1]=1.99; Afp[0][2]=1.33; Afp[0][3]=1.67;
@@ -502,7 +527,7 @@ module tb_TOP_1;
         Bfp[1][0]=1.88; Bfp[1][1]=1.33; Bfp[1][2]=1.66; Bfp[1][3]=1.02;
         Bfp[2][0]=1.55; Bfp[2][1]=1.99; Bfp[2][2]=1.08; Bfp[2][3]=1.42;
         Bfp[3][0]=1.31; Bfp[3][1]=1.62; Bfp[3][2]=1.93; Bfp[3][3]=1.24;
-        run_test(9, "near-1 extremes", 8'h18, 8'h19);
+        run_test(9, "near-1 extremes");
 
         // ---------------- T10: mid-range mixed ----------------
         Afp[0][0]=2.50; Afp[0][1]=3.70; Afp[0][2]=1.40; Afp[0][3]=4.20;
@@ -513,7 +538,7 @@ module tb_TOP_1;
         Bfp[1][0]=3.40; Bfp[1][1]=1.30; Bfp[1][2]=2.80; Bfp[1][3]=1.50;
         Bfp[2][0]=2.20; Bfp[2][1]=4.10; Bfp[2][2]=1.70; Bfp[2][3]=3.60;
         Bfp[3][0]=3.60; Bfp[3][1]=1.70; Bfp[3][2]=4.10; Bfp[3][3]=2.20;
-        run_test(10, "mid-range mixed", 8'h20, 8'h21);
+        run_test(10, "mid-range mixed");
 
         // ---------------- T11: mid-range all unique ----------------
         Afp[0][0]=1.50; Afp[0][1]=1.85; Afp[0][2]=2.20; Afp[0][3]=2.55;
@@ -524,7 +549,7 @@ module tb_TOP_1;
         Bfp[1][0]=4.80; Bfp[1][1]=4.50; Bfp[1][2]=4.20; Bfp[1][3]=3.90;
         Bfp[2][0]=3.60; Bfp[2][1]=3.30; Bfp[2][2]=3.00; Bfp[2][3]=2.70;
         Bfp[3][0]=2.40; Bfp[3][1]=2.10; Bfp[3][2]=1.80; Bfp[3][3]=1.50;
-        run_test(11, "mid-range all unique", 8'h22, 8'h23);
+        run_test(11, "mid-range all unique");
 
         // ---------------- T12: mid-range repeating ----------------
         Afp[0][0]=3.30; Afp[0][1]=2.20; Afp[0][2]=4.40; Afp[0][3]=1.10;
@@ -535,7 +560,7 @@ module tb_TOP_1;
         Bfp[1][0]=4.80; Bfp[1][1]=1.70; Bfp[1][2]=3.90; Bfp[1][3]=2.60;
         Bfp[2][0]=6.10; Bfp[2][1]=1.30; Bfp[2][2]=5.20; Bfp[2][3]=2.40;
         Bfp[3][0]=2.40; Bfp[3][1]=5.20; Bfp[3][2]=1.30; Bfp[3][3]=6.10;
-        run_test(12, "mid-range repeating", 8'h24, 8'h25);
+        run_test(12, "mid-range repeating");
 
         // ---------------- T13: mid-range scattered ----------------
         Afp[0][0]=2.07; Afp[0][1]=5.83; Afp[0][2]=3.41; Afp[0][3]=1.62;
@@ -546,7 +571,7 @@ module tb_TOP_1;
         Bfp[1][0]=3.52; Bfp[1][1]=6.07; Bfp[1][2]=2.19; Bfp[1][3]=4.64;
         Bfp[2][0]=1.73; Bfp[2][1]=4.28; Bfp[2][2]=5.96; Bfp[2][3]=3.35;
         Bfp[3][0]=6.41; Bfp[3][1]=1.59; Bfp[3][2]=3.82; Bfp[3][3]=5.04;
-        run_test(13, "mid-range scattered", 8'h26, 8'h27);
+        run_test(13, "mid-range scattered");
 
         // ---------------- T14: larger values ----------------
         Afp[0][0]=5.50; Afp[0][1]=10.20; Afp[0][2]=3.30; Afp[0][3]=7.70;
@@ -557,7 +582,7 @@ module tb_TOP_1;
         Bfp[1][0]=2.20; Bfp[1][1]=6.60; Bfp[1][2]=8.80; Bfp[1][3]=4.40;
         Bfp[2][0]=9.50; Bfp[2][1]=3.70; Bfp[2][2]=5.30; Bfp[2][3]=7.10;
         Bfp[3][0]=7.10; Bfp[3][1]=5.30; Bfp[3][2]=3.70; Bfp[3][3]=9.50;
-        run_test(14, "larger values", 8'h30, 8'h31);
+        run_test(14, "larger values");
 
         // ---------------- T15: teens ----------------
         Afp[0][0]=12.50; Afp[0][1]=18.30; Afp[0][2]=9.70; Afp[0][3]=15.10;
@@ -568,7 +593,7 @@ module tb_TOP_1;
         Bfp[1][0]=13.60; Bfp[1][1]=16.80; Bfp[1][2]=7.40; Bfp[1][3]=11.20;
         Bfp[2][0]=14.70; Bfp[2][1]=9.30; Bfp[2][2]=12.10; Bfp[2][3]=17.50;
         Bfp[3][0]=17.50; Bfp[3][1]=12.10; Bfp[3][2]=9.30; Bfp[3][3]=14.70;
-        run_test(15, "teens", 8'h32, 8'h33);
+        run_test(15, "teens");
 
         // ---------------- T16: large all unique ----------------
         Afp[0][0]=8.00; Afp[0][1]=9.70; Afp[0][2]=11.40; Afp[0][3]=13.10;
@@ -579,7 +604,7 @@ module tb_TOP_1;
         Bfp[1][0]=24.80; Bfp[1][1]=23.50; Bfp[1][2]=22.20; Bfp[1][3]=20.90;
         Bfp[2][0]=19.60; Bfp[2][1]=18.30; Bfp[2][2]=17.00; Bfp[2][3]=15.70;
         Bfp[3][0]=14.40; Bfp[3][1]=13.10; Bfp[3][2]=11.80; Bfp[3][3]=10.50;
-        run_test(16, "large all unique", 8'h34, 8'h35);
+        run_test(16, "large all unique");
 
         // ---------------- T17: twenties thirties ----------------
         Afp[0][0]=25.40; Afp[0][1]=31.70; Afp[0][2]=19.20; Afp[0][3]=28.90;
@@ -590,7 +615,7 @@ module tb_TOP_1;
         Bfp[1][0]=26.50; Bfp[1][1]=33.10; Bfp[1][2]=17.30; Bfp[1][3]=22.60;
         Bfp[2][0]=29.40; Bfp[2][1]=21.70; Bfp[2][2]=24.90; Bfp[2][3]=35.20;
         Bfp[3][0]=35.20; Bfp[3][1]=24.90; Bfp[3][2]=21.70; Bfp[3][3]=29.40;
-        run_test(17, "twenties thirties", 8'h36, 8'h37);
+        run_test(17, "twenties thirties");
 
         // ---------------- T18: wide range in block ----------------
         Afp[0][0]=1.20; Afp[0][1]=6.50; Afp[0][2]=2.80; Afp[0][3]=14.00;
@@ -601,7 +626,7 @@ module tb_TOP_1;
         Bfp[1][0]=11.50; Bfp[1][1]=3.20; Bfp[1][2]=9.00; Bfp[1][3]=1.50;
         Bfp[2][0]=2.40; Bfp[2][1]=13.10; Bfp[2][2]=1.70; Bfp[2][3]=7.30;
         Bfp[3][0]=7.30; Bfp[3][1]=1.70; Bfp[3][2]=13.10; Bfp[3][3]=2.40;
-        run_test(18, "wide range in block", 8'h40, 8'h41);
+        run_test(18, "wide range in block");
 
         // ---------------- T19: very wide range ----------------
         Afp[0][0]=1.10; Afp[0][1]=15.00; Afp[0][2]=2.30; Afp[0][3]=60.00;
@@ -612,7 +637,7 @@ module tb_TOP_1;
         Bfp[1][0]=45.00; Bfp[1][1]=4.50; Bfp[1][2]=12.00; Bfp[1][3]=1.30;
         Bfp[2][0]=3.20; Bfp[2][1]=22.00; Bfp[2][2]=1.90; Bfp[2][3]=38.00;
         Bfp[3][0]=38.00; Bfp[3][1]=1.90; Bfp[3][2]=22.00; Bfp[3][3]=3.20;
-        run_test(19, "very wide range", 8'h42, 8'h43);
+        run_test(19, "very wide range");
 
         // ---------------- T20: extreme spread unique ----------------
         Afp[0][0]=1.05; Afp[0][1]=1.50; Afp[0][2]=2.85; Afp[0][3]=5.10;
@@ -623,7 +648,7 @@ module tb_TOP_1;
         Bfp[1][0]=49.50; Bfp[1][1]=41.10; Bfp[1][2]=33.50; Bfp[1][3]=26.70;
         Bfp[2][0]=20.70; Bfp[2][1]=15.50; Bfp[2][2]=11.10; Bfp[2][3]=7.50;
         Bfp[3][0]=4.70; Bfp[3][1]=2.70; Bfp[3][2]=1.50; Bfp[3][3]=1.10;
-        run_test(20, "extreme spread unique", 8'h44, 8'h45);
+        run_test(20, "extreme spread unique");
 
 
         // ================= SIGNED / SUB-1 TESTS (new) =================
@@ -637,7 +662,7 @@ module tb_TOP_1;
         Bfp[1][0]=-4.00; Bfp[1][1]=-1.50; Bfp[1][2]=-3.00; Bfp[1][3]=-2.00;
         Bfp[2][0]=-2.50; Bfp[2][1]=-3.50; Bfp[2][2]=-4.50; Bfp[2][3]=-1.50;
         Bfp[3][0]=-1.50; Bfp[3][1]=-4.50; Bfp[3][2]=-3.50; Bfp[3][3]=-2.50;
-        run_test(21, "all negative", 8'h00, 8'h00);
+        run_test(21, "all negative");
 
         // ---------------- T22: mixed sign, no cancellation ----------------
         Afp[0][0]= 2.50; Afp[0][1]=-3.70; Afp[0][2]= 1.40; Afp[0][3]=-4.20;
@@ -648,7 +673,7 @@ module tb_TOP_1;
         Bfp[1][0]= 3.40; Bfp[1][1]=-1.30; Bfp[1][2]= 2.80; Bfp[1][3]=-1.50;
         Bfp[2][0]=-2.20; Bfp[2][1]= 4.10; Bfp[2][2]=-1.70; Bfp[2][3]= 3.60;
         Bfp[3][0]= 3.60; Bfp[3][1]=-1.70; Bfp[3][2]= 4.10; Bfp[3][3]=-2.20;
-        run_test(22, "mixed sign", 8'h00, 8'h00);
+        run_test(22, "mixed sign");
 
         // ---------------- T23: mixed sign WITH cancellation ----------------
         Afp[0][0]= 2.00; Afp[0][1]=-3.00; Afp[0][2]= 4.00; Afp[0][3]=-1.50;
@@ -659,7 +684,7 @@ module tb_TOP_1;
         Bfp[1][0]= 2.00; Bfp[1][1]=-0.50; Bfp[1][2]= 3.00; Bfp[1][3]=-1.00;
         Bfp[2][0]=-0.50; Bfp[2][1]= 3.00; Bfp[2][2]=-1.00; Bfp[2][3]= 2.00;
         Bfp[3][0]= 3.00; Bfp[3][1]=-1.00; Bfp[3][2]= 2.00; Bfp[3][3]=-0.50;
-        run_test(23, "mixed sign + cancellation", 8'h00, 8'h00);
+        run_test(23, "mixed sign + cancellation");
 
         // ---------------- T24: sub-1 values (negative logs) ----------------
         Afp[0][0]=0.25; Afp[0][1]=0.50; Afp[0][2]=0.75; Afp[0][3]=0.90;
@@ -670,7 +695,7 @@ module tb_TOP_1;
         Bfp[1][0]=0.85; Bfp[1][1]=0.70; Bfp[1][2]=0.55; Bfp[1][3]=0.30;
         Bfp[2][0]=0.45; Bfp[2][1]=0.65; Bfp[2][2]=0.35; Bfp[2][3]=0.95;
         Bfp[3][0]=0.95; Bfp[3][1]=0.35; Bfp[3][2]=0.65; Bfp[3][3]=0.45;
-        run_test(24, "sub-1 values", 8'h00, 8'h00);
+        run_test(24, "sub-1 values");
 
         // ---------------- T25: sub-1 AND negative ----------------
         Afp[0][0]=-0.25; Afp[0][1]= 0.50; Afp[0][2]=-0.75; Afp[0][3]= 0.90;
@@ -681,7 +706,7 @@ module tb_TOP_1;
         Bfp[1][0]=-0.85; Bfp[1][1]= 0.70; Bfp[1][2]=-0.55; Bfp[1][3]= 0.30;
         Bfp[2][0]= 0.45; Bfp[2][1]=-0.65; Bfp[2][2]= 0.35; Bfp[2][3]=-0.95;
         Bfp[3][0]=-0.95; Bfp[3][1]= 0.35; Bfp[3][2]=-0.65; Bfp[3][3]= 0.45;
-        run_test(25, "sub-1 and negative", 8'h00, 8'h00);
+        run_test(25, "sub-1 and negative");
 
         // ---------------- T26: values straddling 1.0 ----------------
         Afp[0][0]=0.50; Afp[0][1]=2.00; Afp[0][2]=0.80; Afp[0][3]=3.20;
@@ -692,7 +717,7 @@ module tb_TOP_1;
         Bfp[1][0]=2.60; Bfp[1][1]=0.40; Bfp[1][2]=1.80; Bfp[1][3]=0.70;
         Bfp[2][0]=1.20; Bfp[2][1]=0.95; Bfp[2][2]=3.00; Bfp[2][3]=0.55;
         Bfp[3][0]=0.55; Bfp[3][1]=3.00; Bfp[3][2]=0.95; Bfp[3][3]=1.20;
-        run_test(26, "straddling 1.0", 8'h00, 8'h00);
+        run_test(26, "straddling 1.0");
 
         // ---- Test 27: random 1..10 (benign) ----
         Afp[0][0]=3.142000000; Afp[0][1]=5.898000000; Afp[0][2]=4.330000000; Afp[0][3]=6.435000000;
@@ -1935,5 +1960,4 @@ module tb_TOP_1;
     initial begin $dumpfile("TOP_1_tb.vcd"); $dumpvars(0, tb_TOP_1); end
     initial begin #4000000; $display("WATCHDOG"); $finish; end
 endmodule
-
 

@@ -11,6 +11,7 @@
 //=============================================================================
 module top_module #(
     parameter MANTISSA_WIDTH = 16,
+    parameter FRAC_WIDTH = 8,
     parameter EXP_WIDTH = 8,
     parameter DATA_WIDTH = 32,
     parameter ARRAY_SIZE = 4,
@@ -18,7 +19,10 @@ module top_module #(
     parameter BLOCK_MANTISSA_WIDTH = 6,   // INPUT block: residual log L, two's complement
     parameter OUT_MANTISSA_WIDTH   = 5,   // OUTPUT block: format_convertor's mantissa (still unsigned)
     parameter SCALE_FACTOR_WIDTH = 4,
-    parameter BLOCK_WIDTH = 64            // {E[8],scale[4],s_v[4],rsvd[24],L[24]}
+    parameter MANT_BUS_WIDTH = ARRAY_SIZE*BLOCK_MANTISSA_WIDTH,
+    parameter BLOCK_BITS     = MANT_BUS_WIDTH + 2*ARRAY_SIZE
+                               + SCALE_FACTOR_WIDTH + EXP_WIDTH,
+    parameter BLOCK_WIDTH    = ((BLOCK_BITS + 7)/8)*8
 )(
     input wire clk,
     input wire rst_n,
@@ -32,21 +36,21 @@ module top_module #(
     // ---- observability / outputs (same as before) ----
     output wire [ARRAY_SIZE-1:0] valid_out [ARRAY_SIZE-1:0],
     output wire valid_exp_out,
-    output wire [EXP_WIDTH-1:0] exponent_out_1,
-    output wire [EXP_WIDTH-1:0] exponent_out_2,
-    output wire [DATA_WIDTH-1:0] mantissa_out_1,
-    output wire [DATA_WIDTH-1:0] mantissa_out_2,
-    output wire [EXP_WIDTH-1:0] exp_m_out_1,
-    output wire [EXP_WIDTH-1:0] exp_m_out_2,
+    output wire signed [EXP_WIDTH-1:0] exponent_out_1,
+    output wire signed [EXP_WIDTH-1:0] exponent_out_2,
+    output wire signed [DATA_WIDTH:0] mantissa_out_1,
+    output wire signed [DATA_WIDTH:0] mantissa_out_2,
+    output wire signed [EXP_WIDTH-1:0] exp_m_out_1,
+    output wire signed [EXP_WIDTH-1:0] exp_m_out_2,
     output wire valid_man_out,
     output wire [1:0] iface_state_out,
     output wire set_i_ready[ARRAY_SIZE-1:0],
-    output wire signed [DATA_WIDTH-1:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    output wire signed [DATA_WIDTH:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
     output wire last_exp_sent,
     output wire mantissas_sent_out,
     output wire block_ready,
     output wire [SCALE_FACTOR_WIDTH-1:0] scale_factor,
-    output wire [EXP_WIDTH-1:0] max_exp,
+    output wire signed [EXP_WIDTH-1:0] max_exp,
     output wire [ARRAY_SIZE*OUT_MANTISSA_WIDTH -1 :0] mantissa_out,
     output wire max_exp_calculated,
 
@@ -78,11 +82,8 @@ wire demand_from_mem [ARRAY_SIZE-1:0];
 
 // ---- edge register bank (front door) ----
 edge_reg_bank #(
-    .ARRAY_SIZE(ARRAY_SIZE),
-    .MANTISSA_WIDTH(MANTISSA_WIDTH),
-    .EXP_WIDTH(EXP_WIDTH),
-    .BLOCK_MANTISSA_WIDTH(BLOCK_MANTISSA_WIDTH),
-    .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
+    .ARRAY_SIZE(ARRAY_SIZE), .MANTISSA_WIDTH(MANTISSA_WIDTH), .EXP_WIDTH(EXP_WIDTH),
+    .BLOCK_MANTISSA_WIDTH(BLOCK_MANTISSA_WIDTH), .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
 )
 bank (
     .clk(clk),
@@ -110,9 +111,9 @@ bank (
 );
 
 systolic_array #(
-    .DATA_WIDTH(DATA_WIDTH),
-    .EXP_WIDTH(EXP_WIDTH),
-    .MANTISSA_WIDTH(MANTISSA_WIDTH)
+    .DATA_WIDTH(DATA_WIDTH), .EXP_WIDTH(EXP_WIDTH),
+    .MANTISSA_WIDTH(MANTISSA_WIDTH), .FRAC_WIDTH(FRAC_WIDTH),
+    .ARRAY_SIZE(ARRAY_SIZE)
 )
 SA (
     .clk(clk),
@@ -150,7 +151,10 @@ always @(posedge clk or negedge rst_n) begin
     end
 end
 
-iface iface(
+iface #(
+    .DATA_WIDTH(DATA_WIDTH), .EXP_WIDTH(EXP_WIDTH), .ARRAY_SIZE(ARRAY_SIZE),
+    .BLOCK_MANTISSA_WIDTH(OUT_MANTISSA_WIDTH), .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
+) iface(
     .clk(clk),
     .rst_n(rst_n),
     .start(start_op),
@@ -172,7 +176,10 @@ iface iface(
     .mantissas_sent_out (mantissas_sent_out)
 );
 
-format_convertor FC(
+format_convertor #(
+    .DATA_WIDTH(DATA_WIDTH), .FRAC_WIDTH(FRAC_WIDTH), .EXP_WIDTH(EXP_WIDTH), .ARRAY_SIZE(ARRAY_SIZE),
+    .BLOCK_MANTISSA_WIDTH(OUT_MANTISSA_WIDTH), .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
+) FC(
     .clk(clk),
     .rst_n(rst_n),
     .mant0(mantissa_out_1),

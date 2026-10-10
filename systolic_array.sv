@@ -3,6 +3,7 @@ module systolic_array #(
     parameter DATA_WIDTH = 32,
     parameter EXP_WIDTH = 8,
     parameter MANTISSA_WIDTH = 16,
+    parameter FRAC_WIDTH = 8,
     parameter ARRAY_SIZE = 4
 )
 (
@@ -21,8 +22,8 @@ module systolic_array #(
     input wire last_in_row_0[ARRAY_SIZE-1:0],
     input wire last_in_col_0[ARRAY_SIZE-1:0],
 
-    output wire signed [DATA_WIDTH-1:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
-    output wire [7:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    output wire signed [DATA_WIDTH:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    output wire signed [EXP_WIDTH-1:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
     output wire [ARRAY_SIZE-1:0] valid_out[ARRAY_SIZE-1:0],
     output wire set_i_ready[ARRAY_SIZE-1:0],
     output wire demand_from_mem[ARRAY_SIZE-1:0]
@@ -65,7 +66,8 @@ generate
     for(i = 0; i < ARRAY_SIZE; i = i + 1) begin : row_loop
         for(j = 0; j < ARRAY_SIZE; j = j + 1) begin : col_loop
 
-PE PE_i_j (
+PE #(.EXP_WIDTH(EXP_WIDTH), .MANTISSA_WIDTH(MANTISSA_WIDTH),
+     .FRAC_WIDTH(FRAC_WIDTH), .DATA_WIDTH(DATA_WIDTH)) PE_i_j (
     .clk(clk),
     .rst_n(rst_n),
     .valid_in(valid_in_row[i][j] && valid_in_col[i][j]), // Valid when both top and left neighbors are valid

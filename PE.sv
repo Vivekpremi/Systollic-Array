@@ -2,14 +2,24 @@
 //`include "exponential_CORDIC.v"
 //PE of block floating point Systolic array
 module PE #(
-    parameter EXP_WIDTH = 8
+    parameter EXP_WIDTH      = 8,    // shared block exponent width
+    parameter MANTISSA_WIDTH = 16,   // log-domain bus width (the 8.8 value)
+    parameter FRAC_WIDTH     = 8,    // fractional bits of that log  (MUST match
+                                     // exponential_CORDIC's Frac_WIDTH)
+    parameter DATA_WIDTH     = 32,   // accumulator / product width
+    // ---- derived, following the  INT.FRAC  notation ----
+    //   INT_WIDTH is the "8" in 8.8: MANTISSA_WIDTH = INT_WIDTH + FRAC_WIDTH
+    parameter INT_WIDTH      = MANTISSA_WIDTH - FRAC_WIDTH,
+    //   adding two INT.FRAC values grows the integer part by one carry bit,
+    //   so the SUM is (INT_WIDTH+1).FRAC_WIDTH -- that is what int_part_held holds
+    parameter SUM_INT_WIDTH  = INT_WIDTH + 1
 )(
     input wire clk,
     input wire rst_n,
     input wire valid_in,
-    input wire signed [15:0] mantissa_col_i_j, 
+    input wire signed [MANTISSA_WIDTH-1:0] mantissa_col_i_j, 
     input wire signed [EXP_WIDTH-1:0] exponent_col_j,
-    input wire signed [15:0] mantissa_row_i_j,
+    input wire signed [MANTISSA_WIDTH-1:0] mantissa_row_i_j,
     input wire signed [EXP_WIDTH-1:0] exponent_row_i,
     input wire sign_col_i_j,              // VALUE sign of the column operand
     input wire sign_row_i_j,              // VALUE sign of the row operand
@@ -18,16 +28,16 @@ module PE #(
     input wire last_row_in,
     input wire last_col_in,
     
-    output wire signed [15:0] mantissa_row_i_j_out,
+    output wire signed [MANTISSA_WIDTH-1:0] mantissa_row_i_j_out,
     output wire last_out,
-    output wire signed [15:0] mantissa_col_i_j_out,
+    output wire signed [MANTISSA_WIDTH-1:0] mantissa_col_i_j_out,
     output wire signed [EXP_WIDTH-1:0] exponent_col_j_out,
     output wire signed [EXP_WIDTH-1:0] exponent_row_i_out,
     output wire sign_col_i_j_out,         // pass-through to next PE
     output wire sign_row_i_j_out,
     output wire zero_col_i_j_out,
     output wire zero_row_i_j_out,
-    output wire signed [31:0] Res_out,
+    output wire signed [DATA_WIDTH:0] Res_out,   // DATA_WIDTH+1: carries the accumulator's guard bit
     output wire valid_out_row_i,
     output wire valid_out_col_j,
     output wire demand_from_mem,
@@ -45,22 +55,24 @@ assign exp_out_d =  exp_sum ;
 // Two's complement makes this a plain signed add, and the [16:8]/[7:0] split
 // below then gives FLOOR(integer part) with an always-positive fraction, which
 // is exactly what the antilog needs:  2^-0.7 = 2^-1 * 2^+0.3
-wire signed [16:0] mantissa_sum;
+wire signed [MANTISSA_WIDTH:0] mantissa_sum;
 assign mantissa_sum = mantissa_col_i_j + mantissa_row_i_j;
 
 // Anti log of mantissa sum
 wire anti_log_valid;
-wire [10:0] anti_log_fractional_part;
+wire [FRAC_WIDTH+2:0] anti_log_fractional_part;
 
 //multiply with ln2 since e^xln2 = 2^x i.e. antilog base 2
 // ln2 in form of shift and add is 0.69314718 = 1>>1 + 1>>3 + 1>>4 + 1>>7
 
-wire [7:0] fractional_part_ln2 = (mantissa_sum[7:0] >> 1) + (mantissa_sum[7:0] >> 3) + (mantissa_sum[7:0] >> 4) + (mantissa_sum[7:0] >> 7);
+wire [FRAC_WIDTH-1:0] frac_part = mantissa_sum[FRAC_WIDTH-1:0];
+wire [FRAC_WIDTH-1:0] fractional_part_ln2 = (frac_part >> 1) + (frac_part >> 3)
+                                          + (frac_part >> 4) + (frac_part >> 7);
 
 exponential_CORDIC  #(
-.Int_WIDTH (9), // Integer width
-.Frac_WIDTH (8),  // Fractional width 
-.DATA_WIDTH (17) // Total width
+.Int_WIDTH (SUM_INT_WIDTH), // Integer width of the log SUM
+.Frac_WIDTH (FRAC_WIDTH),  // Fractional width 
+.DATA_WIDTH (MANTISSA_WIDTH+1) // Total width
 )
 anti_log (
     .clk(clk),
@@ -77,7 +89,7 @@ anti_log (
 // drop the exponent. Operations can't overlap (demand_from_mem = anti_log_valid
 // gates the next operand on the current finishing), so a single held register
 // stays aligned with the in-flight antilog.
-reg signed [8:0] int_part_held;
+reg signed [SUM_INT_WIDTH-1:0] int_part_held;
 // The VALUE sign of the in-flight product needs the SAME treatment: it is
 // consumed at anti_log_valid time, ~10 cycles after the operand bus was gated
 // to 0.  prod_sign = s_v(row) XOR s_v(col)  -- (-)(-)=+, (-)(+)=-.
@@ -93,7 +105,7 @@ always @(posedge clk or negedge rst_n) begin
         sign_held     <= 1'b0;
         zero_held     <= 1'b0;
     end else if(valid_in) begin
-        int_part_held <= mantissa_sum[16:8];
+        int_part_held <= mantissa_sum[MANTISSA_WIDTH:FRAC_WIDTH];
         sign_held     <= sign_row_i_j ^ sign_col_i_j;
         zero_held     <= zero_row_i_j | zero_col_i_j;   // OR: either zero -> product zero
     end else begin
@@ -105,16 +117,22 @@ end
 
 //shifter to multiply 2^ii to 2^.ff  (uses the HELD integer part, not the live bus)
 // BIDIRECTIONAL: a negative integer part (|product| < 1) is a RIGHT shift.
-wire [31:0] antilog_ext = {21'b0, anti_log_fractional_part};
-wire [8:0]  shift_amt   = int_part_held[8] ? (~int_part_held + 9'd1) : int_part_held;
-wire [31:0] multiplication_result =
-        int_part_held[8] ? (antilog_ext >> shift_amt)
+wire [DATA_WIDTH-1:0] antilog_ext =
+        {{(DATA_WIDTH-(FRAC_WIDTH+3)){1'b0}}, anti_log_fractional_part};
+wire [SUM_INT_WIDTH-1:0] shift_amt = int_part_held[SUM_INT_WIDTH-1]
+        ? (~int_part_held + {{(SUM_INT_WIDTH-1){1'b0}},1'b1}) : int_part_held;
+wire [DATA_WIDTH-1:0] multiplication_result =
+        int_part_held[SUM_INT_WIDTH-1] ? (antilog_ext >> shift_amt)
                          : (antilog_ext << shift_amt);
 
 
 //accumalator -- SIGNED. The antilog is always positive, so the product's sign
 //lives entirely in sign_held and decides add vs subtract.
-reg signed [31:0] accum;
+// One bit wider than the product: {1'b0, multiplication_result} is
+// DATA_WIDTH+1 bits, so the sign bit is ADDED rather than taking a bit away
+// from the product.  Previously [DATA_WIDTH-2:0] silently discarded the
+// product's MSB, costing a full bit of range.
+reg signed [DATA_WIDTH:0] accum;
 reg accum_valid;
 reg last_out_q;
 
@@ -128,8 +146,8 @@ else if (anti_log_valid) begin
     // accum_valid / last_out_q still advance so the pipeline and drain are
     // unaffected; only the addition is suppressed.
     if (!zero_held)
-        accum <= sign_held ? (accum - $signed({1'b0, multiplication_result[30:0]}))
-                           : (accum + $signed({1'b0, multiplication_result[30:0]}));
+        accum <= sign_held ? (accum - $signed({1'b0, multiplication_result}))
+                           : (accum + $signed({1'b0, multiplication_result}));
     accum_valid <= 1;
     last_out_q <= last_row_in && last_col_in;
 end else begin
@@ -142,9 +160,9 @@ end
 
 
 //pipeline registers
-reg [7:0] exp_out_q;
-reg [15:0] mantissa_col_i_j_out_q;
-reg [15:0] mantissa_row_i_j_out_q;
+reg signed [EXP_WIDTH-1:0] exp_out_q;
+reg signed [MANTISSA_WIDTH-1:0] mantissa_col_i_j_out_q;
+reg signed [MANTISSA_WIDTH-1:0] mantissa_row_i_j_out_q;
 reg signed [EXP_WIDTH-1:0] exponent_col_j_out_q;
 reg signed [EXP_WIDTH-1:0] exponent_row_i_out_q;
 reg sign_col_i_j_out_q;
@@ -205,3 +223,4 @@ assign last_out = last_out_q; // Output is valid and final when accum is valid a
 assign demand_from_mem = anti_log_valid; // Request new data when current data is valid
 
 endmodule
+

@@ -33,9 +33,12 @@ module edge_reg_bank #(
     parameter BLOCK_MANTISSA_WIDTH = 6,    // one residual log L, TWO'S COMPLEMENT
     parameter SCALE_FACTOR_WIDTH   = 4,
     parameter LOG2_ARRAY_SIZE      = $clog2(ARRAY_SIZE),
-    parameter MANT_BUS_WIDTH      = ARRAY_SIZE*BLOCK_MANTISSA_WIDTH, // logs only (24b)
-    // one BLOCK is 64 bits (see layout below)
-    parameter BLOCK_WIDTH          = 64
+    // ---- derived block geometry: every offset follows from the widths, so
+    //      changing a width (or ARRAY_SIZE) re-lays-out the block automatically
+    parameter MANT_BUS_WIDTH = ARRAY_SIZE*BLOCK_MANTISSA_WIDTH,
+    parameter BLOCK_BITS     = MANT_BUS_WIDTH + 2*ARRAY_SIZE
+                               + SCALE_FACTOR_WIDTH + EXP_WIDTH,
+    parameter BLOCK_WIDTH    = ((BLOCK_BITS + 7)/8)*8   // byte-aligned for AXI
 )(
     input  wire clk,
     input  wire rst_n,
@@ -84,11 +87,11 @@ module edge_reg_bank #(
 );
 
     // field offsets within the 64-bit block
-    localparam MANT_LSB  = 0;    // L[3:0], 4 x 6 bits  -> [23:0]
-    localparam ZERO_LSB  = 44;   // z[3:0]  zero flags  -> [47:44]
-    localparam SIGN_LSB  = 48;   // s_v[3:0]            -> [51:48]
-    localparam SCALE_LSB = 52;   // scale factor        -> [55:52]
-    localparam EXP_LSB   = 56;   // E (signed)          -> [63:56]
+    localparam MANT_LSB  = 0;
+    localparam ZERO_LSB  = MANT_LSB  + MANT_BUS_WIDTH;
+    localparam SIGN_LSB  = ZERO_LSB  + ARRAY_SIZE;
+    localparam SCALE_LSB = SIGN_LSB  + ARRAY_SIZE;
+    localparam EXP_LSB   = SCALE_LSB + SCALE_FACTOR_WIDTH;
 
     wire lane_primed [ARRAY_SIZE-1:0];
 
@@ -172,7 +175,8 @@ module edge_reg_bank #(
 
             descaling #(
                 .MANTISSA_WIDTH(BLOCK_MANTISSA_WIDTH),
-                .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
+                .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH),
+                .PE_MANTISSA_WIDTH(MANTISSA_WIDTH)
             ) u_descale_row (
                 .mant(row_mant_sel),
                 .inp_scale_factor(row_scale_w),
@@ -181,7 +185,8 @@ module edge_reg_bank #(
 
             descaling #(
                 .MANTISSA_WIDTH(BLOCK_MANTISSA_WIDTH),
-                .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
+                .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH),
+                .PE_MANTISSA_WIDTH(MANTISSA_WIDTH)
             ) u_descale_col (
                 .mant(col_mant_sel),
                 .inp_scale_factor(col_scale_w),
@@ -231,3 +236,4 @@ module edge_reg_bank #(
     assign bank_primed = all_primed;
 
 endmodule
+
