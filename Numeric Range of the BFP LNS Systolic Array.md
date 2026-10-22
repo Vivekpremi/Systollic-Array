@@ -1,6 +1,20 @@
 # Numeric Range of the BFP/LNS Systolic Array
 
-Oct 22, 2026 · @vivek
+*Vivek · 22 Oct 2026*
+
+**Contents**
+
+- [Range of everything](#range-of-everything)
+- [Names](#names)
+- [Step 1: the number v](#step-1-the-number-v)
+- [Step 2: the input block](#step-2-the-input-block)
+- [Step 3: into the PE](#step-3-into-the-pe)
+- [Step 4: the multiply, in log form](#step-4-the-multiply-in-log-form)
+- [Step 5: back to a normal number (antilog and shift)](#step-5-back-to-a-normal-number-antilog-and-shift)
+- [Step 6: the sum](#step-6-the-sum)
+- [Step 7: the output block](#step-7-the-output-block)
+- [Where the error comes from](#where-the-error-comes-from)
+- [What the driver should check](#what-the-driver-should-check)
 
 ## Range of everything
 
@@ -62,7 +76,7 @@ Parameters keep their exact RTL names. One **octave** means one doubling, i.e. a
 
 The design never stores v directly. It stores the sign, a zero flag and log2 of the size:
 
-```latex
+```math
 v = (-1)^{sign} \cdot 2^{\log_2 |v|}
 ```
 
@@ -86,7 +100,7 @@ We follow one block through every sub-step, the 4 numbers **20, 5, 3, 1**, with 
 
 **How it is chosen.** E is the average of the logs of the non-zero numbers, rounded to a whole number:
 
-```latex
+```math
 E = \mathrm{round}\Big(\frac{1}{n}\sum_{\text{non-zero } v} \log_2|v|\Big), \qquad n = \text{number of non-zero elements}
 ```
 
@@ -104,7 +118,7 @@ E = \mathrm{round}\Big(\frac{1}{n}\sum_{\text{non-zero } v} \log_2|v|\Big), \qqu
 
 The block rebuilds a number as v = 2^E x 2^(leftover). So the leftover is everything E does not cover:
 
-```latex
+```math
 \log_2|v| = E + L_{true} \quad\Longrightarrow\quad L_{true} = \log_2|v| - E
 ```
 
@@ -127,7 +141,7 @@ The leftover has to be stored as the integer L, which has only BLOCK\_MANTISSA\_
 
 **Step 3: shrink by a power of two.** The value is divided by 2^scale and rounded:
 
-```latex
+```math
 L = \mathrm{round}\Big(\frac{L_{true} \cdot 2^{FRAC\_WIDTH}}{2^{scale}}\Big)
 ```
 
@@ -135,7 +149,7 @@ It has to be a power of two because dividing by 2^scale is just a right shift, a
 
 **Step 4: what one unit of L is worth.** After the shrink, one count of L stands for 2^scale hardware units, and each hardware unit is 1/2^FRAC\_WIDTH octave. Multiplying the two gives the value of one count of L in octaves, called the **step**:
 
-```latex
+```math
 step = 2^{scale} \times \frac{1}{2^{FRAC\_WIDTH}} = 2^{\,scale - FRAC\_WIDTH} \text{ octave}, \qquad L \approx \frac{L_{true}}{step}
 ```
 
@@ -182,7 +196,7 @@ This is derived in two parts: first the error in the log, then the error in the 
 4. Rounding picks the **nearer** neighbour, so the error is the smaller of two distances that add up to one step.
 5. The smaller of two numbers with a fixed total is never more than half the total. So, calling the error in the log e:
 
-```latex
+```math
 |e| \le \frac{step}{2}
 ```
 
@@ -202,7 +216,7 @@ The worst case is a true value exactly in the middle of two stairs: both distanc
 6. The stored log is the true log plus e: log2(v\_stored) = log2(v) + e.
 7. Undo the log by raising 2 to both sides, using 2^(a + b) = 2^a x 2^b:
 
-```latex
+```math
 v_{stored} = 2^{\log_2 v} \cdot 2^{e} = v \cdot 2^{e}
 ```
 
@@ -210,13 +224,13 @@ So an error **added** to the log becomes an error **multiplied** onto the value.
 
 8. The relative error is therefore:
 
-```latex
+```math
 \frac{v_{stored} - v}{v} = \frac{v \cdot 2^{e} - v}{v} = 2^{e} - 1
 ```
 
 9. It is largest when e is largest, e = step/2:
 
-```latex
+```math
 \frac{|v_{stored} - v|}{|v|} \;\le\; 2^{\,step/2} - 1
 ```
 
@@ -266,7 +280,7 @@ The trade-off is visible in every row: each step up in scale doubles the reach a
 
 *Case B in general:* take ARRAY\_SIZE - 1 equal numbers and one outlier that is spread octaves above them. The outlier lifts the average by only spread / ARRAY\_SIZE, so the outlier's distance from E is:
 
-```latex
+```math
 spread - \frac{spread}{ARRAY\_SIZE} = spread \cdot \frac{ARRAY\_SIZE - 1}{ARRAY\_SIZE}
 ```
 
@@ -294,13 +308,13 @@ So the scale must be at most 5, which gives step = 1/8 and a reach of 31 x 1/8 =
 
 The edge register bank sends one number at a time into the array. E, sign and zero travel on their own wires. L is turned back into a log value, in units of 1/2^FRAC\_WIDTH octave, by shifting it left by the scale (the descaler):
 
-```latex
+```math
 L_{bus} = L \cdot 2^{scale} \qquad\text{so}\qquad \frac{L_{bus}}{2^{FRAC\_WIDTH}} = L \cdot step \approx L_{true}
 ```
 
 L\_bus goes on a signed bus of MANTISSA\_WIDTH bits, so it must fit:
 
-```latex
+```math
 -2^{MANTISSA\_WIDTH-1} \;\le\; L \cdot 2^{scale} \;\le\; 2^{MANTISSA\_WIDTH-1} - 1
 ```
 
@@ -311,7 +325,7 @@ L\_bus goes on a signed bus of MANTISSA\_WIDTH bits, so it must fit:
 3. The bus holds down to -2^(MANTISSA\_WIDTH - 1). So we need 2^(BLOCK\_MANTISSA\_WIDTH - 1 + scale) ≤ 2^(MANTISSA\_WIDTH - 1), i.e. BLOCK\_MANTISSA\_WIDTH - 1 + scale ≤ MANTISSA\_WIDTH - 1.
 4. Cancel the -1 on both sides:
 
-```latex
+```math
 scale \;\le\; MANTISSA\_WIDTH - BLOCK\_MANTISSA\_WIDTH
 ```
 
@@ -327,7 +341,7 @@ scale \;\le\; MANTISSA\_WIDTH - BLOCK\_MANTISSA\_WIDTH
 
 In one PE a number a from a row block meets a number b from a column block. Their product is formed without a multiplier, only adds:
 
-```latex
+```math
 a \cdot b = (-1)^{sign_a \oplus sign_b} \cdot 2^{\,E_{row} + E_{col}} \cdot 2^{\,L_{row} + L_{col}}
 ```
 
@@ -352,7 +366,7 @@ Running example: 20 x 5 from Step 4, leftover **2.75** octaves, exponent 4.
 
 ### 5a. Split the leftover into a whole part and a fraction
 
-```latex
+```math
 L_{row} + L_{col} = k + f, \qquad k = \lfloor L_{row} + L_{col} \rfloor, \qquad 0 \le f < 1, \qquad 2^{L_{row}+L_{col}} = 2^{k} \cdot 2^{f}
 ```
 
@@ -366,13 +380,13 @@ L_{row} + L_{col} = k + f, \qquad k = \lfloor L_{row} + L_{col} \rfloor, \qquad 
 
 The CORDIC unit computes 2^f as e^(f x ln2) and returns it as an integer A with FRAC\_WIDTH fraction bits:
 
-```latex
+```math
 A = \mathrm{round}\big(2^{f} \cdot 2^{FRAC\_WIDTH}\big)
 ```
 
 **How many bits A needs.** Since 1 ≤ 2^f < 2, multiplying by 2^FRAC\_WIDTH = 256 gives 256 ≤ A < 512. Every such number is 1 followed by 8 more bits in binary (256 = 100000000), so A always has **FRAC\_WIDTH + 1 = 9 bits**:
 
-```latex
+```math
 2^{FRAC\_WIDTH} \le A < 2^{FRAC\_WIDTH+1} \quad\Longrightarrow\quad A \text{ has } FRAC\_WIDTH + 1 \text{ bits}
 ```
 
@@ -382,7 +396,7 @@ A = \mathrm{round}\big(2^{f} \cdot 2^{FRAC\_WIDTH}\big)
 
 Multiplying A by 2^k is a shift, written into a register P of DATA\_WIDTH bits:
 
-```latex
+```math
 P = A \cdot 2^{k} \;\;(\text{shift left by } k \text{ if } k \ge 0, \text{ right by } |k| \text{ if } k < 0), \qquad \frac{P}{2^{FRAC\_WIDTH}} \approx 2^{\,L_{row}+L_{col}}
 ```
 
@@ -390,13 +404,13 @@ P = A \cdot 2^{k} \;\;(\text{shift left by } k \text{ if } k \ge 0, \text{ right
 
 **How many bits P needs.** Shifting left by k adds k zeros on the right, so P needs (FRAC\_WIDTH + 1) + k bits. The register has DATA\_WIDTH bits, so:
 
-```latex
+```math
 FRAC\_WIDTH + 1 + k \;\le\; DATA\_WIDTH \quad\Longleftrightarrow\quad k \le DATA\_WIDTH - FRAC\_WIDTH - 1
 ```
 
 k is the leftover rounded down, so k ≤ 23 is the same as the leftover being below 24:
 
-```latex
+```math
 L_{row} + L_{col} \;<\; DATA\_WIDTH - FRAC\_WIDTH \qquad (= 24 \text{ octaves by default})
 ```
 
@@ -414,13 +428,13 @@ If the leftover is negative, k is negative and A is shifted **right** by abs(k).
 
 **When the product vanishes.** A has FRAC\_WIDTH + 1 bits, so after FRAC\_WIDTH + 1 right shifts nothing is left and P = 0:
 
-```latex
+```math
 |k| \ge FRAC\_WIDTH + 1 \quad\Longleftrightarrow\quad L_{row} + L_{col} \;<\; -FRAC\_WIDTH \qquad (= -8 \text{ octaves by default})
 ```
 
 **Why this is usually harmless.** What falls off is always less than one unit of P. One unit of P is worth 2^(-FRAC\_WIDTH) x 2^(E\_row + E\_col), so each term loses less than:
 
-```latex
+```math
 \text{lost per term} \;<\; 2^{\,E_{row} + E_{col} - FRAC\_WIDTH}
 ```
 
@@ -443,7 +457,7 @@ Each PE adds ARRAY\_SIZE products, one from each position k of its row and colum
 
 **6a. The accumulator.** It is signed with DATA\_WIDTH + 1 bits. Each P is added or subtracted by its sign bit, and skipped if its zero flag is set:
 
-```latex
+```math
 Res\_out = \sum_{\text{terms}} \pm P, \qquad |Res\_out| < 2^{DATA\_WIDTH}
 ```
 
@@ -454,13 +468,13 @@ Res\_out = \sum_{\text{terms}} \pm P, \qquad |Res\_out| < 2^{DATA\_WIDTH}
 3. **What the accumulator holds.** It has DATA\_WIDTH + 1 bits: one for the sign and DATA\_WIDTH for the size. So the size must stay below 2^DATA\_WIDTH.
 4. **Put them together** and take log2 of both sides:
 
-```latex
+```math
 ARRAY\_SIZE \cdot 2^{\,FRAC\_WIDTH + 1 + k} \le 2^{DATA\_WIDTH} \quad\Longleftrightarrow\quad \log_2(ARRAY\_SIZE) + FRAC\_WIDTH + 1 + k \le DATA\_WIDTH
 ```
 
 5. **Solve for k** and, as in 5c, turn the bound on k into a bound on the leftover:
 
-```latex
+```math
 k \le DATA\_WIDTH - FRAC\_WIDTH - 1 - \log_2(ARRAY\_SIZE) \quad\Longleftrightarrow\quad L_{row} + L_{col} \;<\; DATA\_WIDTH - FRAC\_WIDTH - \log_2(ARRAY\_SIZE)
 ```
 
@@ -472,7 +486,7 @@ k \le DATA\_WIDTH - FRAC\_WIDTH - 1 - \log_2(ARRAY\_SIZE) \quad\Longleftrightarr
 
 **6c. What Res\_out means.** Res\_out counts in units of 1/2^FRAC\_WIDTH, relative to the PE's exponent, so the PE's result is:
 
-```latex
+```math
 C_{ij} = \frac{Res\_out}{2^{FRAC\_WIDTH}} \cdot 2^{\,E_{row} + E_{col}}
 ```
 
@@ -486,7 +500,7 @@ Each column of C (ARRAY\_SIZE results) is packed back into a block of exactly th
 
 **7b. The log of each result.** From Step 6c, log2|C| splits into a part that needs a log circuit and a part that is plain integer arithmetic:
 
-```latex
+```math
 \log_2|C| = \log_2|Res\_out| - FRAC\_WIDTH + (E_{row} + E_{col})
 ```
 
@@ -494,7 +508,7 @@ The second part is exact integer arithmetic. The first part, log2|Res\_out|, nee
 
 **Part 1: write the number as 2^p x (1 + x).** Let p be the position of the leading 1 of |Res\_out| (bit 0 is the last bit). That leading 1 is worth 2^p, and everything after it is a remainder smaller than 2^p. Pulling out 2^p:
 
-```latex
+```math
 |Res\_out| = 2^{p} + \text{rest} = 2^{p}\Big(1 + \frac{\text{rest}}{2^{p}}\Big) = 2^{p}(1 + x), \qquad 0 \le x < 1
 ```
 
@@ -504,13 +518,13 @@ Dividing by 2^p just moves the binary point to right after the leading 1, so **x
 
 **Part 2: the exact log and Mitchell's shortcut.** Taking log2 of Part 1 gives the exact log:
 
-```latex
+```math
 \log_2|Res\_out| = p + \log_2(1 + x)
 ```
 
 The integer p is free: it is just the position of the leading 1. The hard part is log2(1 + x). Mitchell's method replaces it with x itself:
 
-```latex
+```math
 \log_2|Res\_out| \;\approx\; p + x
 ```
 
@@ -533,17 +547,17 @@ Both curves start at 0 and end at 1. The exact one bends upward in between, and 
 
 **Part 4: the largest gap.** Call the gap g(x) = log2(1 + x) - x. It is 0 at both ends, so its largest value is where its slope is 0:
 
-```latex
+```math
 g'(x) = \frac{1}{(1+x)\ln 2} - 1 = 0 \quad\Longrightarrow\quad x = \frac{1}{\ln 2} - 1 \approx 0.443
 ```
 
-```latex
+```math
 g(0.443) = \log_2(1.443) - 0.443 = 0.529 - 0.443 \approx 0.0861 \text{ octave}
 ```
 
 A log error of e octaves is a value error of 2^e - 1 (Step 2e, Part 2). So:
 
-```latex
+```math
 0 \;\le\; \text{log error} \;\le\; 0.0861 \text{ octave} \quad\Longrightarrow\quad \text{value error} \;\le\; 2^{0.0861} - 1 = 6.2\%, \text{ always too low}
 ```
 
@@ -553,7 +567,7 @@ Powers of two have x = 0, so they come out exact. The worst case is a number who
 
 **7c. E of the output block.** As in Step 2a, E is the rounded average of the logs of the non-zero results. It must fit EXP\_WIDTH bits like the input:
 
-```latex
+```math
 E_{out} = \mathrm{clamp}\big(\mathrm{round}(\text{mean log}_2|C|),\; E_{MIN},\; E_{MAX}\big)
 ```
 
@@ -574,7 +588,7 @@ Either way the values are only approximate, because L has to carry the overflow.
 
 **7e. Total error of one output number,** compared with the ideal result:
 
-```latex
+```math
 \text{error} \approx \underbrace{\text{input rounding (Step 2e, both operands)}}_{\text{and the PE (Step 5e)}} + \underbrace{\text{Mitchell} \le 6.2\%}_{7b} + \underbrace{\text{output rounding}}_{7d}
 ```
 
