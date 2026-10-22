@@ -41,14 +41,14 @@ module PE #(
     output wire valid_out_row_i,
     output wire valid_out_col_j,
     output wire demand_from_mem,
-    output wire signed [EXP_WIDTH-1:0] exp_out
+    output wire signed [EXP_WIDTH:0] exp_out     // EXP_WIDTH+1: sum of two signed EXP_WIDTH exponents
 );
 
 //exponent adder (SIGNED: E can be negative for |v| < 1)
-wire signed [EXP_WIDTH-1:0] exp_sum;
+wire signed [EXP_WIDTH:0] exp_sum;
 assign exp_sum = exponent_col_j + exponent_row_i;
 
-wire signed [EXP_WIDTH-1:0] exp_out_d;
+wire signed [EXP_WIDTH:0] exp_out_d;
 assign exp_out_d =  exp_sum ;
 
 //mantissa adder -- SIGNED log add.  L_a + L_b = log2(|a|*|b|).
@@ -160,7 +160,7 @@ end
 
 
 //pipeline registers
-reg signed [EXP_WIDTH-1:0] exp_out_q;
+reg signed [EXP_WIDTH:0] exp_out_q;
 reg signed [MANTISSA_WIDTH-1:0] mantissa_col_i_j_out_q;
 reg signed [MANTISSA_WIDTH-1:0] mantissa_row_i_j_out_q;
 reg signed [EXP_WIDTH-1:0] exponent_col_j_out_q;

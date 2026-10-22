@@ -23,10 +23,7 @@
 module tb_TOP_1;
     parameter DATA_WIDTH=32, EXP_WIDTH=8, MANTISSA_WIDTH=16, FRAC_WIDTH=8, ARRAY_SIZE=4;
     parameter BLOCK_MANTISSA_WIDTH = 6, SCALE_FACTOR_WIDTH=4;
-    parameter OUT_MANTISSA_WIDTH = 5;   // `parameter`, not localparam: the OM knob
-                                        // reaches it through -GOUT_MANTISSA_WIDTH
     localparam MBW = ARRAY_SIZE*BLOCK_MANTISSA_WIDTH;   // 24 (input block L field)
-    localparam OMW = ARRAY_SIZE*OUT_MANTISSA_WIDTH;     // 20 (format_convertor output)
     localparam BLOCK_BITS = MBW + 2*ARRAY_SIZE + SCALE_FACTOR_WIDTH + EXP_WIDTH;
     localparam BW  = ((BLOCK_BITS + 7)/8)*8;
     localparam MANT_LSB  = 0;
@@ -45,14 +42,18 @@ module tb_TOP_1;
     wire [ARRAY_SIZE-1:0] valid_out [ARRAY_SIZE-1:0];
     wire valid_exp_out, valid_man_out, last_exp_sent, mantissas_sent_out;
     wire block_ready, max_exp_calculated, bank_primed;
-    wire [EXP_WIDTH-1:0] exponent_out_1, exponent_out_2, exp_m_out_1, exp_m_out_2, max_exp;
+    wire [EXP_WIDTH:0]   exponent_out_1, exponent_out_2, exp_m_out_1, exp_m_out_2;   // per-PE exponent path: EXP_WIDTH+1
+    wire [EXP_WIDTH-1:0] max_exp;                                                      // block E field: EXP_WIDTH
     wire signed [DATA_WIDTH:0] mantissa_out_1, mantissa_out_2;
     wire [1:0] iface_state_out;
     wire set_i_ready [ARRAY_SIZE-1:0];
     wire signed [DATA_WIDTH:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
     wire [SCALE_FACTOR_WIDTH-1:0] scale_factor;
-    wire [OMW-1:0] mantissa_out;
-    wire signed [EXP_WIDTH-1:0] exp_out_hw [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];   // per-PE exponent from HW
+    wire [MBW-1:0] mantissa_out;              // L[], now TWO'S COMPLEMENT
+    wire [ARRAY_SIZE-1:0] sign_out, zero_out;  // per-element sign / zero
+    wire [BW-1:0] block_out;                   // SAME format as row_block/col_block
+    wire exp_overflow, exp_underflow;          // output block E clamped (out of range)
+    wire signed [EXP_WIDTH:0] exp_out_hw [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];   // per-PE exponent from HW
 
     top_module #(
         .MANTISSA_WIDTH       (MANTISSA_WIDTH),
@@ -61,7 +62,6 @@ module tb_TOP_1;
         .DATA_WIDTH           (DATA_WIDTH),
         .ARRAY_SIZE           (ARRAY_SIZE),
         .BLOCK_MANTISSA_WIDTH (BLOCK_MANTISSA_WIDTH),
-        .OUT_MANTISSA_WIDTH   (OUT_MANTISSA_WIDTH),
         .SCALE_FACTOR_WIDTH   (SCALE_FACTOR_WIDTH)
     ) uut (
         .clk(clk), .rst_n(rst_n),
@@ -75,6 +75,8 @@ module tb_TOP_1;
         .last_exp_sent(last_exp_sent), .mantissas_sent_out(mantissas_sent_out),
         .block_ready(block_ready), .scale_factor(scale_factor), .max_exp(max_exp),
         .mantissa_out(mantissa_out), .max_exp_calculated(max_exp_calculated),
+        .block_out(block_out), .sign_out(sign_out), .zero_out(zero_out),
+        .exp_overflow(exp_overflow), .exp_underflow(exp_underflow),
         .exp_out(exp_out_hw),
         .bank_primed(bank_primed)
     );
@@ -113,32 +115,41 @@ module tb_TOP_1;
 
     // smallest scale s.t. every L fits 6-bit two's complement (-32..+31)
     // Zero elements must not constrain the shared scale -- their L is a dummy.
+    // largest scale the SCALE_FACTOR_WIDTH field can hold (was hardcoded 15,
+    // which broke the SCALE_FACTOR_WIDTH knob: at width 2 the tb could pick a
+    // scale that does not fit the field)
+    localparam SMAX = (1 << SCALE_FACTOR_WIDTH) - 1;
+
     function integer pick_scale_m(input integer l0,l1,l2,l3, input [3:0] act);
         integer s,m0,m1,m2,m3;
+        reg     found;
         begin
-            pick_scale_m = 15;
-            for (s=0; s<16; s=s+1) begin
+            pick_scale_m = SMAX; found = 1'b0;
+            for (s=0; s<=SMAX; s=s+1) begin
                 m0=sdiv_round(l0,s); m1=sdiv_round(l1,s);
                 m2=sdiv_round(l2,s); m3=sdiv_round(l3,s);
                 if ( (!act[0] || (m0>=LMIN && m0<=LMAX)) &&
                      (!act[1] || (m1>=LMIN && m1<=LMAX)) &&
                      (!act[2] || (m2>=LMIN && m2<=LMAX)) &&
-                     (!act[3] || (m3>=LMIN && m3<=LMAX)) && pick_scale_m==15)
-                    pick_scale_m = s;
+                     (!act[3] || (m3>=LMIN && m3<=LMAX)) && !found) begin
+                    pick_scale_m = s; found = 1'b1;
+                end
             end
         end
     endfunction
 
     function integer pick_scale(input integer l0,l1,l2,l3);
         integer s,m0,m1,m2,m3;
+        reg     found;
         begin
-            pick_scale = 15;
-            for (s=0; s<16; s=s+1) begin
+            pick_scale = SMAX; found = 1'b0;
+            for (s=0; s<=SMAX; s=s+1) begin
                 m0=sdiv_round(l0,s); m1=sdiv_round(l1,s);
                 m2=sdiv_round(l2,s); m3=sdiv_round(l3,s);
                 if (m0>=LMIN && m0<=LMAX && m1>=LMIN && m1<=LMAX &&
-                    m2>=LMIN && m2<=LMAX && m3>=LMIN && m3<=LMAX && pick_scale==15)
-                    pick_scale = s;
+                    m2>=LMIN && m2<=LMAX && m3>=LMIN && m3<=LMAX && !found) begin
+                    pick_scale = s; found = 1'b1;
+                end
             end
         end
     endfunction
@@ -251,13 +262,14 @@ module tb_TOP_1;
                 end
             end
             t_id=id; t_name=name; t_cond=wcond; t_flip=sflip;
+            fc_check; account;
             make_txt;
             t_nstr = $sformatf("%0s", name);
-            $display("  %4d | %-32s | %8.3f%% | %2d  | %2d  | %0s",
-                      id, t_nstr, wcond*100.0, sflip, t_experr,
-                      ((wcond>0.10)||(t_experr!=0))?"FAIL":"PASS");
+            $display("  %4d | %-32s | %8.3f%% | %2d  | %2d  | %8.3f%% | %0s",
+                      id, t_nstr, wcond*100.0, sflip, t_experr, t_fc_norm*100.0,
+                      t_fail ? "FAIL" : "PASS");
             if (t_experr!=0) s_experr = s_experr + 1;
-            if (wcond>0.10) nfail = nfail + 1;
+            if (t_fail) nfail = nfail + 1;
             ntests = ntests + 1;
             acc_sum = acc_sum + 100.0*(1.0-tot_err/16.0);
         end
@@ -276,9 +288,172 @@ module tb_TOP_1;
     integer exp_hw [0:3][0:3];     // what the hardware produced
     integer exp_ref[0:3][0:3];     // what it should be (E_row+E_col)
     integer t_experr;              // mismatching exponents this test
+    // ---- output-block (format conversion) check state ----
+    integer t_fcerr;               // failing block elements + structural errors this test
+    real    t_fc_norm;             // worst block error this test
+    real    fc_dec [0:3][0:3];     // [elem][block] value decoded from the hardware block
+    integer t_fcoor;               // blocks correctly flagged out of range this test
+    // IDEAL block, encoded in software from EXPECTED C (exact log2, no hardware
+    // approximations) -- [block] for per-block fields, [elem][block] per element
+    integer x_E   [0:3], x_S [0:3];
+    reg     x_ovf [0:3], x_unf [0:3];
+    integer x_L   [0:3][0:3];
+    reg     x_sg  [0:3][0:3], x_z [0:3][0:3];
+    integer g_L   [0:3][0:3];          // hardware L, unpacked from mantissa_out
+    real    fc_nerr [0:3][0:3];        // |decoded - expected C| / max|expected C in column|
+    integer m_E, m_S, m_L, m_SG, m_Z, m_OV, m_UN;   // field mismatches this test
+    integer t_fcval;                   // values over the 10% tolerance this test
+    integer c_oor;                 // blocks flagged out of range, whole run
+    reg     fc_n_bad;              // set if the number of blocks produced != ARRAY_SIZE
+    reg     t_fail;                // this test failed ANY check
+    integer c_res, c_exp, c_fc;    // per-check failure counts, whole run
+    real    s_fcworst;             // worst block-normalised error, whole run
     reg [8*44:1] t_name;
     string       t_nstr;
     integer t_id;
+
+    // ======================================================================
+    // OUTPUT BLOCK CAPTURE
+    // format_convertor emits one packed output block per column, flagged by
+    // block_ready. Nothing in this testbench looked at max_exp/scale_factor/
+    // mantissa_out before, so the whole format-conversion path was untested.
+    // Capture every block as it is produced; fc_n counts how many arrived.
+    // ======================================================================
+    localparam MAX_BLK = 16;
+    integer                       fc_n;
+    integer                       fc_exp   [0:MAX_BLK-1];   // max_exp, signed
+    integer                       fc_scale [0:MAX_BLK-1];   // scale_factor
+    reg [MBW-1:0]                 fc_mant  [0:MAX_BLK-1];   // packed L[], signed
+    reg                           fc_ovf   [0:MAX_BLK-1];   // exp_overflow with the block
+    reg                           fc_unf   [0:MAX_BLK-1];   // exp_underflow with the block
+    reg [ARRAY_SIZE-1:0]          fc_sign  [0:MAX_BLK-1];
+    reg [ARRAY_SIZE-1:0]          fc_zero  [0:MAX_BLK-1];
+    integer                       fc_time  [0:MAX_BLK-1];   // $time, for ordering
+
+    // async reset, matching the RTL's `negedge rst_n` style (a synchronous
+    // reset here makes rst_n both sync and async -> SYNCASYNCNET).
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            fc_n <= 0;
+        end else if (block_ready && fc_n < MAX_BLK) begin
+            fc_exp  [fc_n] <= 32'(signed'(max_exp));
+            fc_scale[fc_n] <= 32'(scale_factor);
+            fc_mant [fc_n] <= mantissa_out;
+            fc_sign [fc_n] <= sign_out;
+            fc_zero [fc_n] <= zero_out;
+            fc_ovf  [fc_n] <= exp_overflow;
+            fc_unf  [fc_n] <= exp_underflow;
+            fc_time [fc_n] <= 32'($time);   // $time is 64-bit; fc_time is integer
+            fc_n           <= fc_n + 1;
+        end
+    end
+
+    // ======================================================================
+    // OUTPUT BLOCK CHECK
+    // Expected = the IDEAL block, encoded in software from EXPECTED C (the true
+    // A x B), exactly like the input blocks are built: exact log2, E =
+    // round(mean log2|v|), E clamped to the EXP_WIDTH range (flagged), smallest
+    // scale that fits, L rounded to nearest. Block j is column j of C.
+    // Got = the block format_convertor produced.
+    // PASS/FAIL is decided on VALUES, like the Res_out check: each hardware
+    // block is decoded back to numbers and compared with EXPECTED C, the error
+    // normalised by the largest |EXPECTED C| in that column, tolerance 10%.
+    // exp_overflow / exp_underflow must also match. The other fields are
+    // REPORTED, not failed: the hardware log is approximate (Mitchell), so E or
+    // L differing by 1 from the ideal is normal.
+    // Blocks whose ideal E is out of range are skipped in the value check --
+    // they cannot be represented in this format.
+    // ======================================================================
+    task fc_ideal(input integer b);
+        integer m, lg [0:3], emax, emin;
+        reg [3:0] zf;
+        begin
+            emax =  (1 << (EXP_WIDTH-1)) - 1;
+            emin = -(1 << (EXP_WIDTH-1));
+            for (m = 0; m < 4; m = m + 1) begin
+                x_z [m][b] = (Cexp[m][b] == 0.0);
+                x_sg[m][b] = (Cexp[m][b] <  0.0);
+                zf[m]      = x_z[m][b];
+            end
+            x_E[b]   = calc_E(Cexp[0][b], Cexp[1][b], Cexp[2][b], Cexp[3][b]);
+            x_ovf[b] = (x_E[b] > emax);
+            x_unf[b] = (x_E[b] < emin);
+            if (x_ovf[b]) x_E[b] = emax;
+            if (x_unf[b]) x_E[b] = emin;
+            for (m = 0; m < 4; m = m + 1)
+                lg[m] = x_z[m][b] ? 0 : (log8p8(absr(Cexp[m][b])) - x_E[b]*LOG_ONE);
+            x_S[b] = pick_scale_m(lg[0], lg[1], lg[2], lg[3], ~zf);
+            for (m = 0; m < 4; m = m + 1) begin
+                x_L[m][b] = x_z[m][b] ? 0 : sdiv_round(lg[m], x_S[b]);
+                if (x_L[m][b] > LMAX) x_L[m][b] = LMAX;
+                if (x_L[m][b] < LMIN) x_L[m][b] = LMIN;
+            end
+        end
+    endtask
+
+    task fc_check;
+        integer b, m, lraw;
+        real    ev, dv, lgv, mx, d, nrm;
+        reg     skip;
+        begin
+            t_fc_norm = 0.0; t_fcoor = 0; t_fcval = 0;
+            m_E = 0; m_S = 0; m_L = 0; m_SG = 0; m_Z = 0; m_OV = 0; m_UN = 0;
+            fc_n_bad = (fc_n != ARRAY_SIZE);
+            for (b = 0; b < 4; b = b + 1) begin
+                fc_ideal(b);
+                mx = 0.0;
+                for (m = 0; m < 4; m = m + 1) if (absr(Cexp[m][b]) > mx) mx = absr(Cexp[m][b]);
+                skip = x_ovf[b] || x_unf[b];          // ideal block itself out of range
+                if (skip) t_fcoor = t_fcoor + 1;
+                if (b < fc_n) begin
+                    if (fc_exp[b]   != x_E[b])   m_E  = m_E  + 1;
+                    if (fc_scale[b] != x_S[b])   m_S  = m_S  + 1;
+                    if (fc_ovf[b]   != x_ovf[b]) m_OV = m_OV + 1;
+                    if (fc_unf[b]   != x_unf[b]) m_UN = m_UN + 1;
+                end
+                for (m = 0; m < 4; m = m + 1) begin
+                    ev = Cexp[m][b];
+                    dv = 0.0; g_L[m][b] = 0;
+                    if (b < fc_n) begin
+                        lraw = (32'(fc_mant[b]) >> (m*BLOCK_MANTISSA_WIDTH))
+                               & ((1<<BLOCK_MANTISSA_WIDTH)-1);
+                        if (lraw >= (1<<(BLOCK_MANTISSA_WIDTH-1)))
+                            lraw = lraw - (1<<BLOCK_MANTISSA_WIDTH);
+                        g_L[m][b] = lraw;
+                        if (lraw            != x_L[m][b])  m_L  = m_L  + 1;
+                        if (fc_sign[b][m]   != x_sg[m][b]) m_SG = m_SG + 1;
+                        if (fc_zero[b][m]   != x_z[m][b])  m_Z  = m_Z  + 1;
+                        if (!fc_zero[b][m]) begin
+                            lgv = $itor(lraw * (1<<fc_scale[b])) / $itor(LOG_ONE);
+                            dv  = 2.0 ** ($itor(fc_exp[b]) + lgv);
+                            if (fc_sign[b][m]) dv = -dv;
+                        end
+                    end
+                    fc_dec[m][b] = dv;
+                    d   = absr(dv - ev);
+                    nrm = (mx > 0.0) ? d/mx : 0.0;
+                    fc_nerr[m][b] = nrm;
+                    if (!skip && nrm > t_fc_norm) t_fc_norm = nrm;
+                    if (!skip && nrm > 0.10)      t_fcval   = t_fcval + 1;
+                end
+            end
+            // FAIL on: wrong block count, values over tolerance, wrong flags
+            t_fcerr = (fc_n_bad ? 1 : 0) + t_fcval + m_OV + m_UN;
+            if (t_fc_norm > s_fcworst) s_fcworst = t_fc_norm;
+            c_oor = c_oor + t_fcoor;
+        end
+    endtask
+
+    // One place that decides pass/fail, so run_test and run_case cannot drift.
+    // (Before this, an exponent-only failure printed FAIL but was never counted.)
+    task account;
+        begin
+            if (t_cond > 0.10)  c_res = c_res + 1;
+            if (t_experr != 0)  c_exp = c_exp + 1;
+            if (t_fcerr  != 0)  c_fc  = c_fc  + 1;
+            t_fail = (t_cond > 0.10) || (t_experr != 0) || (t_fcerr != 0);
+        end
+    endtask
 
     task make_txt;
         integer i3,j3;
@@ -331,16 +506,80 @@ module tb_TOP_1;
             $fwrite(fh,"    exponent mismatches : %0d of 16  %0s\n",
                     t_experr, (t_experr==0)?"(OK)":"(*** MISMATCH ***)");
 
+            fc_dump;
+
             $fwrite(fh,"\n  SUMMARY\n");
             $fwrite(fh,"  ------------------------------------------------------\n");
             $fwrite(fh,"    worst condition-aware error : %.3f %%\n", t_cond*100.0);
             $fwrite(fh,"       ( |err| / sum|terms| , immune to cancellation )\n");
             $fwrite(fh,"    sign flips                  : %0d of 16 elements\n", t_flip);
             $fwrite(fh,"    exponent mismatches         : %0d of 16\n", t_experr);
+            $fwrite(fh,"    block values over 10%%       : %0d of 16\n", t_fcval);
+            $fwrite(fh,"    worst block error           : %.3f %%\n", t_fc_norm*100.0);
+            $fwrite(fh,"    exp_overflow/underflow wrong: %0d\n", m_OV + m_UN);
             $fwrite(fh,"    tolerance                   : 10.000 %%\n");
-            $fwrite(fh,"    VERDICT                     : %0s\n",
-                    ((t_cond>0.10)||(t_experr!=0))?"FAIL":"PASS");
+            $fwrite(fh,"    VERDICT                     : %0s\n", t_fail ? "FAIL" : "PASS");
             $fwrite(fh,"\n");
+        end
+    endtask
+
+    // OUTPUT BLOCK CHECK section of the per-test report. Same layout as the
+    // matrices above: 4 blocks side by side, block j = column j of C.
+    task fc_dump;
+        integer r;
+        begin
+            $fwrite(fh,"\n  OUTPUT BLOCK CHECK   hardware block  vs  ideal block (software, from EXPECTED C)\n");
+            $fwrite(fh,"  ------------------------------------------------------\n");
+            $fwrite(fh,"   one block per column of C: block 0 = column 0, ...   blocks produced : %0d of 4 %0s\n\n",
+                    fc_n, fc_n_bad ? "(*** WRONG ***)" : "(OK)");
+            $fwrite(fh,"                        block0  block1  block2  block3\n");
+            $fwrite(fh,"   exponent E     got  [ %6d  %6d  %6d  %6d ]\n", fc_exp[0], fc_exp[1], fc_exp[2], fc_exp[3]);
+            $fwrite(fh,"                  exp  [ %6d  %6d  %6d  %6d ]\n", x_E[0], x_E[1], x_E[2], x_E[3]);
+            $fwrite(fh,"   scale          got  [ %6d  %6d  %6d  %6d ]\n", fc_scale[0], fc_scale[1], fc_scale[2], fc_scale[3]);
+            $fwrite(fh,"                  exp  [ %6d  %6d  %6d  %6d ]\n", x_S[0], x_S[1], x_S[2], x_S[3]);
+            $fwrite(fh,"   exp_overflow   got  [ %6d  %6d  %6d  %6d ]\n", fc_ovf[0], fc_ovf[1], fc_ovf[2], fc_ovf[3]);
+            $fwrite(fh,"                  exp  [ %6d  %6d  %6d  %6d ]\n", x_ovf[0], x_ovf[1], x_ovf[2], x_ovf[3]);
+            $fwrite(fh,"   exp_underflow  got  [ %6d  %6d  %6d  %6d ]\n", fc_unf[0], fc_unf[1], fc_unf[2], fc_unf[3]);
+            $fwrite(fh,"                  exp  [ %6d  %6d  %6d  %6d ]\n", x_unf[0], x_unf[1], x_unf[2], x_unf[3]);
+
+            $fwrite(fh,"\n   mantissa L   (row i = element i of the column)\n");
+            for (r = 0; r < 4; r = r + 1)
+                $fwrite(fh,"                  got  [ %6d  %6d  %6d  %6d ]     exp [ %6d  %6d  %6d  %6d ]\n",
+                        g_L[r][0], g_L[r][1], g_L[r][2], g_L[r][3],
+                        x_L[r][0], x_L[r][1], x_L[r][2], x_L[r][3]);
+            $fwrite(fh,"\n   sign   (1 = negative)\n");
+            for (r = 0; r < 4; r = r + 1)
+                $fwrite(fh,"                  got  [ %6d  %6d  %6d  %6d ]     exp [ %6d  %6d  %6d  %6d ]\n",
+                        fc_sign[0][r], fc_sign[1][r], fc_sign[2][r], fc_sign[3][r],
+                        x_sg[r][0], x_sg[r][1], x_sg[r][2], x_sg[r][3]);
+            $fwrite(fh,"\n   zero   (1 = value is exactly 0)\n");
+            for (r = 0; r < 4; r = r + 1)
+                $fwrite(fh,"                  got  [ %6d  %6d  %6d  %6d ]     exp [ %6d  %6d  %6d  %6d ]\n",
+                        fc_zero[0][r], fc_zero[1][r], fc_zero[2][r], fc_zero[3][r],
+                        x_z[r][0], x_z[r][1], x_z[r][2], x_z[r][3]);
+
+            $fwrite(fh,"\n    mismatches : exponent %0d/4  scale %0d/4  mantissa %0d/16  sign %0d/16  zero %0d/16\n",
+                    m_E, m_S, m_L, m_SG, m_Z);
+            $fwrite(fh,"                 exp_overflow %0d/4  exp_underflow %0d/4   %0s\n", m_OV, m_UN,
+                    (m_OV + m_UN == 0) ? "(flags OK)" : "(*** FLAG MISMATCH ***)");
+            $fwrite(fh,"    (exponent/scale/mantissa/sign/zero are shown, not failed: the hardware\n");
+            $fwrite(fh,"     log is approximate, so a difference of 1 from the ideal is normal)\n");
+
+            $fwrite(fh,"\n  DECODED C  (value read back from the hardware blocks)\n");
+            $fwrite(fh,"  ------------------------------------------------------\n");
+            for (r = 0; r < 4; r = r + 1)
+                $fwrite(fh,"   [ %12.4f %12.4f %12.4f %12.4f ]\n",
+                        fc_dec[r][0], fc_dec[r][1], fc_dec[r][2], fc_dec[r][3]);
+
+            $fwrite(fh,"\n  BLOCK ERROR  |decoded - expected C| / largest |expected C| in that column\n");
+            $fwrite(fh,"  ------------------------------------------------------\n");
+            for (r = 0; r < 4; r = r + 1)
+                $fwrite(fh,"   [ %11.3f%% %11.3f%% %11.3f%% %11.3f%% ]\n",
+                        fc_nerr[r][0]*100.0, fc_nerr[r][1]*100.0, fc_nerr[r][2]*100.0, fc_nerr[r][3]*100.0);
+            $fwrite(fh,"    values over 10%% : %0d of 16      worst : %.3f %%   %0s\n",
+                    t_fcval, t_fc_norm*100.0, (t_fcval == 0) ? "(OK)" : "(*** OVER TOLERANCE ***)");
+            if (t_fcoor != 0)
+                $fwrite(fh,"    %0d block(s) out of exponent range: E clamped + flagged, values skipped\n", t_fcoor);
         end
     endtask
 
@@ -394,17 +633,18 @@ module tb_TOP_1;
             end
 
             t_id=id; t_name=name; t_cond=wc; t_flip=sf;
+            fc_check; account;
             make_txt;
 
             s_run = s_run+1; s_sum = s_sum+wc;
             if (wc > s_worst) s_worst = wc;
-            if (wc > 0.10) s_fail = s_fail+1;
+            if (t_fail)    s_fail = s_fail+1;
             if (sf > 0)    s_flip = s_flip+1;
             // terminal: one compact table row only
             t_nstr = $sformatf("%0s", name);
-            $display("  %4d | %-32s | %8.3f%% | %2d  | %2d  | %0s",
-                      id, t_nstr, wc*100.0, sf, t_experr,
-                      ((wc>0.10)||(t_experr!=0))?"FAIL":"PASS");
+            $display("  %4d | %-32s | %8.3f%% | %2d  | %2d  | %8.3f%% | %0s",
+                      id, t_nstr, wc*100.0, sf, t_experr, t_fc_norm*100.0,
+                      t_fail ? "FAIL" : "PASS");
             if (t_experr!=0) s_experr = s_experr + 1;
         end
     endtask
@@ -412,6 +652,7 @@ module tb_TOP_1;
     initial begin
         clrwe; ntests=0; nfail=0; acc_sum=0.0;
         s_run=0; s_fail=0; s_flip=0; s_experr=0; s_worst=0.0; s_sum=0.0;
+        c_res=0; c_exp=0; c_fc=0; c_oor=0; t_fcoor=0; s_fcworst=0.0; fc_n_bad=1'b0; t_fcerr=0; t_fail=1'b0;
         fh = $fopen("test_report.txt","w");
         if (fh == 0) begin $display("ERROR: cannot open test_report.txt"); $finish; end
         $fwrite(fh,"================================================================================\n");
@@ -423,9 +664,9 @@ module tb_TOP_1;
         $fwrite(fh,"  Tolerance: 10%%\n");
         $fwrite(fh,"================================================================================\n");
         $display("");
-        $display(" ---------------------------------------------------------------------------");
-        $display("  TEST | NAME                             | COND-ERR | SF  | EXP | RESULT");
-        $display(" ---------------------------------------------------------------------------");
+        $display(" ------------------------------------------------------------------------------------");
+        $display("  TEST | NAME                             | COND-ERR | SF  | EXP |  BLK-ERR | RESULT");
+        $display(" ------------------------------------------------------------------------------------");
         for(i=0;i<4;i=i+1) begin row_block[i]=0; col_block[i]=0; end
         rst_n=0; #20 rst_n=1;
         @(posedge clk);
@@ -1928,15 +2169,20 @@ module tb_TOP_1;
         Bfp[2][0]=2.506000000; Bfp[2][1]=-3.197000000; Bfp[2][2]=-2.397000000; Bfp[2][3]=-2.595000000;
         Bfp[3][0]=-1.699000000; Bfp[3][1]=-1.530000000; Bfp[3][2]=1.322000000; Bfp[3][3]=-1.702000000;
         run_case(136, "cancellation risk signed");
-        $display(" ---------------------------------------------------------------------------");
+        $display(" ------------------------------------------------------------------------------------");
         $display("");
         $display(" ============================ OVERALL SUMMARY ============================");
         $display("   total tests run        : %0d", ntests + s_run);
         $display("   passed                 : %0d", (ntests+s_run)-(nfail+s_fail));
-        $display("   failed (>10%% cond-err) : %0d", nfail + s_fail);
+        $display("   failed (any check)     : %0d", nfail + s_fail);
+        $display("     Res_out  >10%% cond-err : %0d", c_res);
+        $display("     exponent mismatches    : %0d", c_exp);
+        $display("     output-block errors    : %0d", c_fc);
+        $display("   blocks flagged out of range: %0d  (E clamped, reported, not a failure)", c_oor);
         $display("   tests with sign flips  : %0d", s_flip);
         $display("   tests w/ exponent errors: %0d", s_experr);
         $display("   worst cond-err         : %.3f%%", (s_worst>0.0?s_worst:0.0)*100.0);
+        $display("   worst block-normalised  : %.3f%%", s_fcworst*100.0);
         $display("   mean cond-err (appended): %.3f%%", (s_sum/s_run)*100.0);
         $display("   RESULT                 : %0s", ((nfail+s_fail)==0)?"ALL PASSED":"SOME FAILED");
         $display(" =========================================================================");
@@ -1948,7 +2194,12 @@ module tb_TOP_1;
         $fwrite(fh,"================================================================================\n");
         $fwrite(fh,"   total tests run         : %0d\n", ntests + s_run);
         $fwrite(fh,"   passed                  : %0d\n", (ntests+s_run)-(nfail+s_fail));
-        $fwrite(fh,"   failed (>10%% cond-err)  : %0d\n", nfail + s_fail);
+        $fwrite(fh,"   failed (any check)      : %0d\n", nfail + s_fail);
+        $fwrite(fh,"     Res_out  >10%% cond-err  : %0d\n", c_res);
+        $fwrite(fh,"     exponent mismatches     : %0d\n", c_exp);
+        $fwrite(fh,"     output-block errors     : %0d\n", c_fc);
+        $fwrite(fh,"   blocks flagged out of range : %0d  (E clamped, reported, not a failure)\n", c_oor);
+        $fwrite(fh,"   worst block-normalised    : %.3f %%\n", s_fcworst*100.0);
         $fwrite(fh,"   tests with sign flips   : %0d\n", s_flip);
         $fwrite(fh,"   worst cond-err          : %.3f %%\n", s_worst*100.0);
         $fwrite(fh,"   RESULT                  : %0s\n", ((nfail+s_fail)==0)?"ALL PASSED":"SOME FAILED");

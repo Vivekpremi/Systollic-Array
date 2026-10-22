@@ -23,7 +23,7 @@ module systolic_array #(
     input wire last_in_col_0[ARRAY_SIZE-1:0],
 
     output wire signed [DATA_WIDTH:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
-    output wire signed [EXP_WIDTH-1:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    output wire signed [EXP_WIDTH:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
     output wire [ARRAY_SIZE-1:0] valid_out[ARRAY_SIZE-1:0],
     output wire set_i_ready[ARRAY_SIZE-1:0],
     output wire demand_from_mem[ARRAY_SIZE-1:0]
@@ -54,6 +54,14 @@ genvar i, j;
     wire valid_out_row[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
     wire valid_out_col[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
     wire valid_condition[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
+    // One demand output PER PE. Previously every PE in row i drove the same
+    // demand_from_mem[i] net (multiple drivers). Only the ENTRY PE [i][0]
+    // now drives the row's demand: it is the PE that consumes the bank's
+    // output, and it always finishes first (it gets its operand first; a zero
+    // operand still runs the CORDIC). Verified: Res_out identical on all 136
+    // tests vs the multi-driver version. An AND of the row deadlocks the
+    // bank pacing (the PEs finish staggered, so all are never high together).
+    wire [ARRAY_SIZE-1:0] demand_pe [ARRAY_SIZE-1:0];
 
     reg last_hori[ARRAY_SIZE-1:0];
     reg last_vert[ARRAY_SIZE-1:0];
@@ -93,7 +101,7 @@ PE #(.EXP_WIDTH(EXP_WIDTH), .MANTISSA_WIDTH(MANTISSA_WIDTH),
     .valid_out_row_i(valid_out_row[i][j]),
     .valid_out_col_j(valid_out_col[i][j]),
     .last_out(last_out[i][j]),
-    .demand_from_mem(demand_from_mem[i]) ,
+    .demand_from_mem(demand_pe[i][j]) ,
     .exp_out(exp_out[i][j])
 );
 assign mantissa_col_i_j[i+1][j] = mantissa_col_i_j_out[i][j];
@@ -129,6 +137,7 @@ always @(posedge clk or negedge rst_n) begin
     end
 end
 
+assign demand_from_mem[i] = demand_pe[i][0];   // single driver: entry PE
 assign set_i_ready[i] = demand_from_mem[i]; // Set ready when both row and column inputs are valid
 
 assign valid_in_row[i][0] = valid_in_row_0[i]; 

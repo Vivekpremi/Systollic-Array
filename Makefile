@@ -47,16 +47,14 @@ MANTISSA_WIDTH       ?= 16
 FRAC_WIDTH           ?= 8
 # DATA_WIDTH -- product width. The accumulator is DATA_WIDTH+1 (guard bit).
 DATA_WIDTH           ?= 32
-# BLOCK_MANTISSA_WIDTH -- residual log L per element in the INPUT block,
-# two's complement. The single biggest accuracy lever.
+# BLOCK_MANTISSA_WIDTH -- residual log L per element, two's complement, in
+# BOTH the input and the output block (one format). The biggest accuracy lever.
 BLOCK_MANTISSA_WIDTH ?= 6
-# OUT_MANTISSA_WIDTH -- mantissa field in the OUTPUT block from format_convertor.
-OUT_MANTISSA_WIDTH   ?= 5
 # SCALE_FACTOR_WIDTH -- shared per-block scale factor.
 SCALE_FACTOR_WIDTH   ?= 4
 
 PARAM_LIST := ARRAY_SIZE EXP_WIDTH MANTISSA_WIDTH FRAC_WIDTH DATA_WIDTH \
-              BLOCK_MANTISSA_WIDTH OUT_MANTISSA_WIDTH SCALE_FACTOR_WIDTH
+              BLOCK_MANTISSA_WIDTH SCALE_FACTOR_WIDTH
 
 # One-line description per knob, printed by `make help`. Kept beside
 # PARAM_LIST so the two cannot drift apart.
@@ -65,8 +63,7 @@ DESC_EXP_WIDTH            := shared block exponent, signed (per-PE sum is E_row+
 DESC_MANTISSA_WIDTH       := log-domain bus into the PE, INT+FRAC total (8.8 by default)
 DESC_FRAC_WIDTH           := fractional bits of that log; INT_WIDTH = MANTISSA_WIDTH-FRAC_WIDTH
 DESC_DATA_WIDTH           := product width; the PE accumulator is DATA_WIDTH+1 (guard bit)
-DESC_BLOCK_MANTISSA_WIDTH := residual log L per element in the INPUT block, two's complement
-DESC_OUT_MANTISSA_WIDTH   := mantissa field per element in the OUTPUT block from format_convertor
+DESC_BLOCK_MANTISSA_WIDTH := residual log L per element, two's complement; input AND output block
 DESC_SCALE_FACTOR_WIDTH   := shared per-block scale factor (L is stored as L>>scale)
 
 # -GNAME=value for every knob above. $($(p)) is a double expansion: $(p) is the
@@ -165,10 +162,9 @@ sweep:
 	    "DATA_WIDTH=48" "DATA_WIDTH=24" \
 	    "MANTISSA_WIDTH=20" "MANTISSA_WIDTH=12" \
 	    "BLOCK_MANTISSA_WIDTH=8" "BLOCK_MANTISSA_WIDTH=4" \
-	    "OUT_MANTISSA_WIDTH=7" "OUT_MANTISSA_WIDTH=4" \
-	    "SCALE_FACTOR_WIDTH=6" "SCALE_FACTOR_WIDTH=2" \
+		    "SCALE_FACTOR_WIDTH=6" "SCALE_FACTOR_WIDTH=2" \
 	    "BLOCK_MANTISSA_WIDTH=8 DATA_WIDTH=48 EXP_WIDTH=12" \
-	    "ARRAY_SIZE=8 EXP_WIDTH=12 DATA_WIDTH=48 BLOCK_MANTISSA_WIDTH=8 OUT_MANTISSA_WIDTH=7 SCALE_FACTOR_WIDTH=6" ; do \
+	    "ARRAY_SIZE=8 EXP_WIDTH=12 DATA_WIDTH=48 BLOCK_MANTISSA_WIDTH=8 SCALE_FACTOR_WIDTH=6" ; do \
 	  if $(MAKE) --no-print-directory lint $$cfg >/dev/null 2>&1; then \
 	    printf "  PASS  %s\n" "$${cfg:-defaults}"; \
 	  else \
@@ -212,3 +208,6 @@ help:
 	@echo "  FRAC_WIDTH  must be 8               (CORDIC e[] table is 8 consts)"
 	@echo "  ARRAY_SIZE  lints at any legal value but cannot be swept in"
 	@echo "              simulation: the testbench stimulus is explicit 4x4"
+
+
+	

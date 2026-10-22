@@ -20,14 +20,14 @@ module iface#(
     input wire start,
     input wire [ARRAY_SIZE-1:0] valid_column [ARRAY_SIZE-1:0],
     input wire signed [DATA_WIDTH:0] mantissa[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
-    input wire signed [EXP_WIDTH-1:0] exponent[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    input wire signed [EXP_WIDTH:0] exponent[ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
     input wire max_exp_calculated,
 
     output wire valid_exp_out,      
-    output wire signed [EXP_WIDTH-1:0] exp_out_1,
-    output wire signed [EXP_WIDTH-1:0] exp_out_2,      
+    output wire signed [EXP_WIDTH:0] exp_out_1,
+    output wire signed [EXP_WIDTH:0] exp_out_2,      
     output wire signed [DATA_WIDTH:0] mantissa_out_1,mantissa_out_2,
-    output wire signed [EXP_WIDTH-1:0]  exp_m_out_1, exp_m_out_2,
+    output wire signed [EXP_WIDTH:0]  exp_m_out_1, exp_m_out_2,
     output wire valid_man_out,
     output wire [1:0] state_out,
     output wire last_exp_sent,
@@ -37,9 +37,9 @@ module iface#(
 genvar i,j;
 
 reg  valid_exp_out_q;
-reg signed [EXP_WIDTH-1:0] exp_out_1_q, exp_out_2_q;
+reg signed [EXP_WIDTH:0] exp_out_1_q, exp_out_2_q;
 reg signed [DATA_WIDTH:0] mantissa_out_1_q,mantissa_out_2_q;
-reg signed [EXP_WIDTH-1:0]  exp_m_out_1_q, exp_m_out_2_q;
+reg signed [EXP_WIDTH:0]  exp_m_out_1_q, exp_m_out_2_q;
 reg valid_man_out_q;
 
 //FSM to control the flow of data

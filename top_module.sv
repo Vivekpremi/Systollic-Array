@@ -16,8 +16,10 @@ module top_module #(
     parameter DATA_WIDTH = 32,
     parameter ARRAY_SIZE = 4,
     parameter LOG2_ARRAY_SIZE = $clog2(ARRAY_SIZE),
-    parameter BLOCK_MANTISSA_WIDTH = 6,   // INPUT block: residual log L, two's complement
-    parameter OUT_MANTISSA_WIDTH   = 5,   // OUTPUT block: format_convertor's mantissa (still unsigned)
+    // residual log L per element, two's complement. ONE value for BOTH the
+    // input and the output block: the two formats are identical so a tile's
+    // result can be fed straight back in as an operand.
+    parameter BLOCK_MANTISSA_WIDTH = 6,
     parameter SCALE_FACTOR_WIDTH = 4,
     parameter MANT_BUS_WIDTH = ARRAY_SIZE*BLOCK_MANTISSA_WIDTH,
     parameter BLOCK_BITS     = MANT_BUS_WIDTH + 2*ARRAY_SIZE
@@ -36,12 +38,12 @@ module top_module #(
     // ---- observability / outputs (same as before) ----
     output wire [ARRAY_SIZE-1:0] valid_out [ARRAY_SIZE-1:0],
     output wire valid_exp_out,
-    output wire signed [EXP_WIDTH-1:0] exponent_out_1,
-    output wire signed [EXP_WIDTH-1:0] exponent_out_2,
+    output wire signed [EXP_WIDTH:0] exponent_out_1,
+    output wire signed [EXP_WIDTH:0] exponent_out_2,
     output wire signed [DATA_WIDTH:0] mantissa_out_1,
     output wire signed [DATA_WIDTH:0] mantissa_out_2,
-    output wire signed [EXP_WIDTH-1:0] exp_m_out_1,
-    output wire signed [EXP_WIDTH-1:0] exp_m_out_2,
+    output wire signed [EXP_WIDTH:0] exp_m_out_1,
+    output wire signed [EXP_WIDTH:0] exp_m_out_2,
     output wire valid_man_out,
     output wire [1:0] iface_state_out,
     output wire set_i_ready[ARRAY_SIZE-1:0],
@@ -51,12 +53,19 @@ module top_module #(
     output wire block_ready,
     output wire [SCALE_FACTOR_WIDTH-1:0] scale_factor,
     output wire signed [EXP_WIDTH-1:0] max_exp,
-    output wire [ARRAY_SIZE*OUT_MANTISSA_WIDTH -1 :0] mantissa_out,
+    output wire [MANT_BUS_WIDTH-1:0] mantissa_out,
+    // the OUTPUT block, same layout/semantics as row_block/col_block so a
+    // tile's result can be fed straight back in as a tile's operand
+    output wire [BLOCK_WIDTH-1:0] block_out,      // same width/layout as row_block/col_block
+    output wire [ARRAY_SIZE-1:0] sign_out,
+    output wire [ARRAY_SIZE-1:0] zero_out,
     output wire max_exp_calculated,
+    output wire exp_overflow,     // output block E clamped high (result out of range)
+    output wire exp_underflow,    // output block E clamped low
 
     // ---- per-PE exponent, exposed so the testbench can CHECK the
     //      hardware exponent path instead of trusting its own copy ----
-    output wire signed [EXP_WIDTH-1:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    output wire signed [EXP_WIDTH:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
 
     // ---- bank status ----
     output wire bank_primed
@@ -153,7 +162,7 @@ end
 
 iface #(
     .DATA_WIDTH(DATA_WIDTH), .EXP_WIDTH(EXP_WIDTH), .ARRAY_SIZE(ARRAY_SIZE),
-    .BLOCK_MANTISSA_WIDTH(OUT_MANTISSA_WIDTH), .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
+    .BLOCK_MANTISSA_WIDTH(BLOCK_MANTISSA_WIDTH), .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
 ) iface(
     .clk(clk),
     .rst_n(rst_n),
@@ -178,7 +187,7 @@ iface #(
 
 format_convertor #(
     .DATA_WIDTH(DATA_WIDTH), .FRAC_WIDTH(FRAC_WIDTH), .EXP_WIDTH(EXP_WIDTH), .ARRAY_SIZE(ARRAY_SIZE),
-    .BLOCK_MANTISSA_WIDTH(OUT_MANTISSA_WIDTH), .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
+    .BLOCK_MANTISSA_WIDTH(BLOCK_MANTISSA_WIDTH), .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
 ) FC(
     .clk(clk),
     .rst_n(rst_n),
@@ -193,10 +202,15 @@ format_convertor #(
     .exp_valid(valid_exp_out),
     .last_exp_sent(last_exp_sent),
 
+    .block_out(block_out),
     .max_exp(max_exp),
     .scale_factor(scale_factor),
     .mantissa_out(mantissa_out),
+    .sign_out(sign_out),
+    .zero_out(zero_out),
     .block_ready(block_ready),
+    .exp_overflow(exp_overflow),
+    .exp_underflow(exp_underflow),
     .max_exp_calculated(max_exp_calculated)
 );
 

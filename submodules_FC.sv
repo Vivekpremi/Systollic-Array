@@ -159,8 +159,14 @@ shifter #(.DATA_WIDTH(WIDTH), .EXP_WIDTH(SH_EXP_W)) sh1(
     .out(raw_mant)
 );
 
-// bits [WIDTH-2 : WIDTH-1-FRAC_BITS] -- the FRAC_BITS just under the leading one
-assign log_mant = {{(WIDTH-FRAC_BITS){1'b0}}, raw_mant[WIDTH-2 -: FRAC_BITS]} + exp_mant;
+// Mitchell-style log: integer part = leading-one POSITION, fraction = the
+// FRAC_BITS just under it.  log2(v) ~= pos + f, so in FRAC_BITS fixed point
+// the result is (pos << FRAC_BITS) + frac.
+// BUG FIXED: exp_mant was added WITHOUT the shift, i.e. the position (0..31)
+// and the fraction (0..255) were summed at the SAME binary weight, so the
+// fraction swamped the exponent.  v=24 (log2=4.585, ideal 1174) gave 132.
+assign log_mant = (exp_mant << FRAC_BITS)
+                + {{(WIDTH-FRAC_BITS){1'b0}}, raw_mant[WIDTH-2 -: FRAC_BITS]};
 
 endmodule
 
@@ -179,7 +185,12 @@ module round_2_power #(
         .one_hot(lead_one_hot)
     );
 
-    assign out_num = (((lead_one_hot >> 1) & inp_num) != 0) 
+    // Round UP to a power of two: up if ANY bit below the leading one is set.
+    // BUG FIXED: the test was ((lead_one_hot >> 1) & inp_num), which looks at
+    // only the ONE bit immediately below the leading one, so 529 (0b1000010001)
+    // rounded DOWN to 512.  That made the chosen scale factor one too small and
+    // saturated every output mantissa at the 4-bit ceiling.
+    assign out_num = ((inp_num & ~lead_one_hot) != 0) 
                  ? (lead_one_hot << 1) 
                  : lead_one_hot;
     
