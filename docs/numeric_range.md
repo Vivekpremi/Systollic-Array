@@ -31,8 +31,8 @@ The table lists every quantity in the design, from input to output: its allowed 
 | Spread of the 4 numbers in one block (for at most 4.4% each) | farthest one at most L\_MAX x step from E, at scale 5 | 36x (one outlier) to 215x (evenly spread) | coarser rounding, no flag |
 | Scale the PE can take in | scale at most MANTISSA\_WIDTH - BLOCK\_MANTISSA\_WIDTH | at most 10 | the log value wraps, no flag |
 | PE exponent E\_row + E\_col | EXP\_WIDTH + 1 bits | -256 to 254 | cannot happen |
-| One product term, compared with 2^(E\_row + E\_col) | L\_row + L\_col below DATA\_WIDTH - FRAC\_WIDTH | below 2^24 | top bits lost, no flag |
-| Sum of ARRAY\_SIZE terms, compared with 2^(E\_row + E\_col) | L\_row + L\_col below DATA\_WIDTH - FRAC\_WIDTH - log2(ARRAY\_SIZE) | below 2^22 (about 4 million) | top bits lost, no flag |
+| One product term, compared with 2^(E\_row + E\_col) | L\_row + L\_col below DATA\_WIDTH - FRAC\_WIDTH | below 2^24 | top bits lost, pe\_overflow = 1 |
+| Sum of ARRAY\_SIZE terms, compared with 2^(E\_row + E\_col) | L\_row + L\_col below DATA\_WIDTH - FRAC\_WIDTH - log2(ARRAY\_SIZE) | below 2^22 (about 4 million) | top bits lost, pe\_overflow = 1 |
 | Smallest product term that survives | L\_row + L\_col at least -FRAC\_WIDTH | at least 2^-8 | term becomes 0 |
 | Error added by the output encoder's log | at most 0.086 octave | at most 6.2% | always present |
 
@@ -414,7 +414,7 @@ k is the leftover rounded down, so k ≤ 23 is the same as the leftover being be
 L_{row} + L_{col} \;<\; DATA\_WIDTH - FRAC\_WIDTH \qquad (= 24 \text{ octaves by default})
 ```
 
-**What happens past it.** The top bits do not fit, are cut off, and the product becomes garbage. There is **no flag** for this.
+**What happens past it.** The top bits do not fit, are cut off, and the product becomes garbage. The PE sets its sticky **pe\_overflow** flag (register PE\_OVF\_LO in the AXI wrapper), so the driver can see it.
 
 *Check, test 90:* row 2 of A is (0.00042, 0.00103, 0.0053, 1152). The small numbers pull its E down to -5, so 1152 sits log2(1152) - (-5) = 15.17 octaves above E. Column 3 of B is (1.10, 0.0085, 0.59, 558) with E = 0, so 558 sits 9.12 octaves above E. In the PE they meet: 15.17 + 9.12 = 24.29 octaves, so k = 24, and P would need 9 + 24 = 33 bits in a 32-bit register. The expected 643,203 came out as 0.0032.
 
@@ -480,7 +480,7 @@ k \le DATA\_WIDTH - FRAC\_WIDTH - 1 - \log_2(ARRAY\_SIZE) \quad\Longleftrightarr
 
 **Why the extra log2(ARRAY\_SIZE).** Adding N numbers of the same length can need up to log2(N) more bits. For example, 4 numbers of 9 bits each (at most 511) can add up to 2044, which needs 11 bits: 2 more, and log2(4) = 2.
 
-**Default value:** 32 - 8 - 2 = **22 octaves**. No product term may be more than 2^22 (about 4 million) times 2^(E\_row + E\_col). This is 2 octaves stricter than the single-product limit of 24, and like it there is no flag.
+**Default value:** 32 - 8 - 2 = **22 octaves**. No product term may be more than 2^22 (about 4 million) times 2^(E\_row + E\_col). This is 2 octaves stricter than the single-product limit of 24. If the accumulator wraps, the same **pe\_overflow** flag is set.
 
 **It is a safe bound, not an exact one.** It assumes the worst case of step 2. When terms differ in size or sign, the real sum is smaller, so a block can sometimes go slightly past 22 octaves and still be correct.
 
@@ -604,7 +604,7 @@ Inside all the limits, the Mitchell log of Step 7b is the largest error source. 
 | Rounding of an ideal output block | Step 7d | 0.39% | 7.1% |
 | Hardware output encoder, mostly Mitchell | Step 7b | 2.60% | 9.0% |
 
-**Each limit checked against the regression** (136 tests):
+**Each limit checked against the regression** (tests 1-136; tests 137-140 were added later for the divide paths):
 
 | Limit | Derived in | Test | What the derivation predicts | What happened |
 | --- | --- | --- | --- | --- |
@@ -614,7 +614,7 @@ Inside all the limits, the Mitchell log of Step 7b is the largest error source. 
 | Small products | Step 5d | test 107 (terms of 2^-20) | dropped, negligible | exact result |
 | Output exponent | Step 7c | test 120 (ideal E = 201) | clamped to 127, flagged | clamped and flagged on all 4 blocks |
 
-With BLOCK\_MANTISSA\_WIDTH = 8, EXP\_WIDTH = 12 and DATA\_WIDTH = 48, all 136 tests pass, worst error 6.8%. That configuration widens the spread, exponent and big-product limits together.
+With BLOCK\_MANTISSA\_WIDTH = 8, EXP\_WIDTH = 12 and DATA\_WIDTH = 48, all 136 tests that existed then pass, worst error 6.8%. That configuration widens the spread, exponent and big-product limits together.
 
 The obvious hardware improvement: a small correction to Mitchell (a few adders, or an 8- to 16-entry table on x) would cut its 0.086-octave worst case to about 0.01.
 
@@ -625,7 +625,6 @@ Every limit depends only on the blocks the driver builds, so it can be checked i
 1. **Exponent (Steps 2a, 7c):** each block's E must lie within E\_MIN..E\_MAX. If not, scale the tile by a power of two and keep the factor.
 2. **Spread (Step 2g):** a block that needs scale > 5 will be coarse. Regroup the data so wide-range values do not share a block, or use a wider BLOCK\_MANTISSA\_WIDTH.
 3. **PE bus (Step 3):** never send a block with scale > MANTISSA\_WIDTH - BLOCK\_MANTISSA\_WIDTH. This includes output blocks fed back in.
-4. **Big products (Steps 5c, 6b):** for each row block and column block pair, the largest leftover of the row plus the largest of the column must stay below DATA\_WIDTH - FRAC\_WIDTH - log2(ARRAY\_SIZE). If not, split or rescale the tile. The hardware has no flag for this, so this check is the only protection.
+4. **Big products (Steps 5c, 6b):** for each row block and column block pair, the largest leftover of the row plus the largest of the column must stay below DATA\_WIDTH - FRAC\_WIDTH - log2(ARRAY\_SIZE). If not, split or rescale the tile. Checking before sending avoids a wasted tile; the hardware **pe\_overflow** flag catches it afterwards.
 5. **Output flags (Step 7c):** after each output block, read exp\_overflow and exp\_underflow. If either is 1, rescale and rerun that tile.
-
-**Open hardware item:** an overflow flag on the PE product and accumulator would make check 4 a hardware guarantee instead of a software one.
+6. **PE overflow:** after each tile, read PE\_OVF\_LO (STATUS.ACC\_OVF\_ANY = any PE). If a bit is 1, that element of C is wrong: rescale or split and rerun.

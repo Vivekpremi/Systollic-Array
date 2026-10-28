@@ -1,0 +1,19 @@
+# Verilator build folders and outputs
+obj_*/
+*.vcd
+*.fst
+# Vivado project and run files
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.gen/
+*.xpr
+*.jou
+*.log
+*.str
+.Xil/
+!reports/*.log
+# private session handoff notes
+PROJECT_CONTEXT.md

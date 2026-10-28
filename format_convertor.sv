@@ -3,133 +3,145 @@
 `timescale 1ns/1ps
 
 //=============================================================================
-// format_convertor.sv  --  accumulator -> output BLOCK encoder
+// format_convertor.sv  --  PE results  ->  one output block
 //
-// Emits a packed block with EXACTLY the same layout and semantics as the INPUT
-// block that edge_reg_bank consumes, so a tile's output can be fed straight
-// back in as a tile's input:
+// WHAT IT DOES
+//   Takes the ARRAY_SIZE results of one column of the array and packs them into
+//   one block, in exactly the same format as the input blocks, so a result can
+//   be fed back in as an operand.
 //
-//     v = (-1)^s * 2^E * 2^L        (or 0 when the zero flag is set)
+// INPUT (from iface, two elements per clock)
+//   Each PE result is the pair (Res_out, exp_out). Its real value is
+//       v = Res_out / 2^FRAC_WIDTH * 2^exp_out
+//   Res_out is signed, DATA_WIDTH+1 bits; exp_out is signed, EXP_WIDTH+1 bits.
 //
-//     block[MANT_LSB  +: ARRAY_SIZE*BLOCK_MANTISSA_WIDTH] = L[], TWO'S COMPLEMENT
-//     block[ZERO_LSB  +: ARRAY_SIZE]                      = zero flags
-//     block[SIGN_LSB  +: ARRAY_SIZE]                      = value signs
-//     block[SCALE_LSB +: SCALE_FACTOR_WIDTH]              = shared scale factor
-//     block[EXP_LSB   +: EXP_WIDTH]                       = shared exponent E, SIGNED
+// OUTPUT BLOCK  (same as the input block)
+//   v = (-1)^sign * 2^(E + L * 2^scale / 2^FRAC_WIDTH),   or 0 if zero = 1
 //
-// E is chosen by GEOMETRIC-MEAN centring -- E = round(mean of log2|v| over the
-// NON-ZERO elements) -- matching how the input blocks are built, so L straddles
-// zero and the signed residual field is used in both directions.
+//     block[MANT_LSB  +: ARRAY_SIZE*BLOCK_MANTISSA_WIDTH]  L of each element, signed
+//     block[ZERO_LSB  +: ARRAY_SIZE]                       zero flag of each element
+//     block[SIGN_LSB  +: ARRAY_SIZE]                       sign of each element (1 = negative)
+//     block[SCALE_LSB +: SCALE_FACTOR_WIDTH]               shared scale
+//     block[EXP_LSB   +: EXP_WIDTH]                        shared exponent E, signed
 //
-// HOW THIS DIFFERS FROM THE PREVIOUS VERSION
-// The old encoder aligned every mantissa to the column's MAX exponent, took the
-// log of the aligned integer, and emitted that as an UNSIGNED mantissa. That
-// made L a magnitude measured upward from a floor (always >= 0) rather than a
-// signed deviation around a centre, so the output could not be decoded by the
-// input decoder. It also carried no sign and no zero flag, so a negative or
-// zero result was unrepresentable. The alignment shift is gone: per-element
-// ABSOLUTE logs are computed instead, which is what centring needs anyway.
+// HOW (all logs are fixed point with FRAC_WIDTH fraction bits)
+//   1. For each element: sign, zero flag, and its absolute log
+//          alog = log2|v| = log2|Res_out| - FRAC_WIDTH + exp_out
+//   2. E = round(average of alog over the non-zero elements).
+//      If E does not fit EXP_WIDTH bits it is clamped and exp_overflow /
+//      exp_underflow is set.
+//   3. Residual of each element:  resid = alog - E * 2^FRAC_WIDTH
+//   4. scale = the smallest s for which every residual fits in L after
+//      dividing by 2^s.
+//   5. L = round(resid / 2^scale), saturated to L_MIN..L_MAX.
 //
-// FSM:  CALC_MAX_EXP -> COLLECT -> ENCODE -> CALC_MAX_EXP
-//   CALC_MAX_EXP : drain iface's exponent pre-pass; assert max_exp_calculated
-//   COLLECT      : per mantissa pair, record sign / zero / absolute log
-//   ENCODE       : centre, pick the scale factor, quantise, assert block_ready
+// FSM:  ST_COLLECT -> ST_ENCODE -> ST_COLLECT   (once per column)
+//   ST_COLLECT : wait for results (mantissa_valid); take two per clock, store
+//                sign / zero / alog, keep the running sum and count of the
+//                non-zero ones; all_mantissas_sent marks the last pair
+//   ST_ENCODE  : compute E, scale and L (combinational), register the block,
+//                pulse block_ready for one clock, clear the column state
+//
+// LIMITATIONS / NOTES
+//   - log2|Res_out| uses Mitchell's method (log2(1+x) ~ x): it is up to
+//     0.086 octave too low, so a decoded value can be about 6% too small.
+//   - If even scale = SCALE_MAX cannot fit a residual, that L saturates.
+//   - ARRAY_SIZE must be even (results arrive in pairs) and at most 4: only
+//     the divides by n = 1..4 are built (see STEP 2).
+//   - Each element's exponent arrives with it on exp_m_1 / exp_m_2.
 //=============================================================================
 module format_convertor #(
-    parameter ARRAY_SIZE = 4,
-    parameter BLOCK_MANTISSA_WIDTH = 6,   // residual log L, two's complement -- SAME as the input block
-    parameter DATA_WIDTH = 32,
-    parameter FRAC_WIDTH = 8,             // fractional bits of the log format
-    parameter EXP_WIDTH = 8,
-    parameter SCALE_FACTOR_WIDTH = 4,
-    // ---- derived block geometry, identical to edge_reg_bank's ----
-    parameter MANT_BUS_WIDTH = ARRAY_SIZE*BLOCK_MANTISSA_WIDTH,
+    parameter ARRAY_SIZE = 4,             // elements per block (= rows of the array)
+    parameter BLOCK_MANTISSA_WIDTH = 6,   // bits of each L (signed), same as the input block
+    parameter DATA_WIDTH = 32,            // Res_out has DATA_WIDTH+1 bits
+    parameter FRAC_WIDTH = 8,             // fraction bits of every log value
+    parameter EXP_WIDTH = 8,              // bits of the block exponent E (signed)
+    parameter SCALE_FACTOR_WIDTH = 4,     // bits of the block scale
+    // ---- block geometry, identical to edge_reg_bank ----
+    parameter MANT_BUS_WIDTH = ARRAY_SIZE*BLOCK_MANTISSA_WIDTH,   // all L fields together
     parameter BLOCK_BITS     = MANT_BUS_WIDTH + 2*ARRAY_SIZE
-                               + SCALE_FACTOR_WIDTH + EXP_WIDTH,
-    parameter BLOCK_WIDTH    = ((BLOCK_BITS + 7)/8)*8
+                               + SCALE_FACTOR_WIDTH + EXP_WIDTH,  // bits actually used
+    parameter BLOCK_WIDTH    = ((BLOCK_BITS + 7)/8)*8             // rounded up to whole bytes
 )(
     input clk,
     input rst_n,
-    input signed [DATA_WIDTH:0] mant0,
-    input signed [DATA_WIDTH:0] mant1,
-    input signed [EXP_WIDTH:0] exp_m_1,
-    input signed [EXP_WIDTH:0] exp_m_2,
-    input mantissa_valid,
-    input all_mantissas_sent,
-    input signed [EXP_WIDTH:0] exp0,
-    input signed [EXP_WIDTH:0] exp1,
-    input exp_valid,
-    input last_exp_sent,
+    // ---- two results per clock, from iface ----
+    input signed [DATA_WIDTH:0] mant0,          // Res_out of element idx
+    input signed [DATA_WIDTH:0] mant1,          // Res_out of element idx+1
+    input signed [EXP_WIDTH:0] exp_m_1,         // exp_out of element idx
+    input signed [EXP_WIDTH:0] exp_m_2,         // exp_out of element idx+1
+    input mantissa_valid,                       // mant0/mant1/exp_m_* are valid this clock
+    input all_mantissas_sent,                   // this is the last pair of the column
 
-    // ---- the output block, ready to be re-fed as an input block ----
+    // ---- the output block ----
     output [BLOCK_WIDTH-1:0] block_out,
 
-    // ---- decomposed view of the same block (observability / legacy) ----
-    output signed [EXP_WIDTH-1:0]            max_exp,       // = E, signed
-    output [SCALE_FACTOR_WIDTH-1:0]          scale_factor,
-    output [MANT_BUS_WIDTH-1:0]              mantissa_out,  // L[], two's complement
+    // ---- the same block, field by field ----
+    output signed [EXP_WIDTH-1:0]            max_exp,       // E
+    output [SCALE_FACTOR_WIDTH-1:0]          scale_factor,  // scale
+    output [MANT_BUS_WIDTH-1:0]              mantissa_out,  // all L, signed, element 0 in the LSBs
     output [ARRAY_SIZE-1:0]                  sign_out,
     output [ARRAY_SIZE-1:0]                  zero_out,
-    output block_ready,
-    // block exponent out of the EXP_WIDTH range: E was CLAMPED, not wrapped.
-    // Status only (not part of the block), held with the block until the next one.
-    output exp_overflow,
-    output exp_underflow,
-    output reg max_exp_calculated
+    output block_ready,                     // one-clock pulse: block_out is new
+    // E did not fit EXP_WIDTH bits and was clamped (status, not part of the block;
+    // held until the next block)
+    output exp_overflow,                    // E was too large, set to E_MAX
+    output exp_underflow                    // E was too small, set to E_MIN
 );
 
-// ---- field offsets, mirroring edge_reg_bank exactly ----
+// ---- bit position of each field inside the block (same as edge_reg_bank) ----
 localparam MANT_LSB  = 0;
 localparam ZERO_LSB  = MANT_LSB  + MANT_BUS_WIDTH;
 localparam SIGN_LSB  = ZERO_LSB  + ARRAY_SIZE;
 localparam SCALE_LSB = SIGN_LSB  + ARRAY_SIZE;
-localparam EXP_LSB   = SCALE_LSB + SCALE_FACTOR_WIDTH;
 
-// log path width: |accumulator| needs DATA_WIDTH+1 bits
+// ---- widths ----
+// LOGW : width of |Res_out| (the magnitude of a DATA_WIDTH+1-bit signed value)
 localparam LOGW   = DATA_WIDTH + 1;
+// LIDX : bits needed to address one element of the block (log2 of ARRAY_SIZE).
+//        Counters that must reach ARRAY_SIZE itself (idx, nz_cnt) use LIDX+1.
 localparam LIDX   = $clog2(ARRAY_SIZE);
-// ONE signed working width for every log quantity (per-element log, the running
-// sum, the mean, residuals, the scale search). Mixing widths here is what
-// produced a pile of WIDTHEXPAND/WIDTHTRUNC warnings.
-//   |log2(v)| <= 2^(EXP_WIDTH-1) + LOGW, scaled by 2^FRAC_WIDTH, summed over
-//   ARRAY_SIZE elements, plus a sign bit and a little headroom.
-// log_finder's PORT is LOGW bits, but its VALUE is at most
-// ((LOGW-1)<<FRAC_WIDTH)+2^FRAC_WIDTH-1, so only LGW bits are meaningful.
-// Slicing to LGW instead of zero-extending from LOGW is what keeps ALOGW small.
+// LGW  : bits that log_finder's output really uses. log2|Res_out| < LOGW, so
+//        its integer part needs $clog2(LOGW) bits, plus FRAC_WIDTH fraction
+//        bits, plus one spare.
 localparam LGW    = $clog2(LOGW) + FRAC_WIDTH + 1;
-// |log2(v)| <= 2^(EXP_WIDTH-1) + LOGW, scaled by 2^FRAC_WIDTH, summed over
-// ARRAY_SIZE elements, plus sign and one bit of headroom.
-// Sizing this from LOGW instead made it 46 bits and produced a 46-bit divider.
+// ALOGW: signed width used for EVERY log quantity below (alog, their sum, the
+//        mean, residuals, scale search). It must hold the sum of ARRAY_SIZE logs:
+//          |alog| < 2^EXP_WIDTH + LOGW octaves   (exp_out range + log2|Res_out|)
+//          times 2^FRAC_WIDTH (fixed point)      -> + FRAC_WIDTH bits
+//          summed over ARRAY_SIZE elements       -> + LIDX bits
+//          sign + 1 bit of headroom              -> + 2 bits
 localparam ALOGW  = FRAC_WIDTH + $clog2((1 << EXP_WIDTH) + LOGW) + LIDX + 2;
-// signed residual field limits, at the working width for clean comparison
+// L_MAX / L_MIN of a signed BLOCK_MANTISSA_WIDTH field, at width ALOGW for comparisons
 localparam signed [ALOGW-1:0] LMAX =  (1 << (BLOCK_MANTISSA_WIDTH-1)) - 1;
 localparam signed [ALOGW-1:0] LMIN = -(1 << (BLOCK_MANTISSA_WIDTH-1));
 
-localparam ST_EXP = 2'd0, ST_COLLECT = 2'd1, ST_ENCODE = 2'd2;
+localparam ST_COLLECT = 2'd1, ST_ENCODE = 2'd2;
 reg [1:0] state;
 
-reg [LIDX:0]               idx;        // element write pointer (0..ARRAY_SIZE)
-reg signed [ALOGW-1:0]     alog  [0:ARRAY_SIZE-1];   // absolute log2|v|, FRAC fixed pt
-reg                        sgn_r [0:ARRAY_SIZE-1];
-reg                        zer_r [0:ARRAY_SIZE-1];
-reg signed [ALOGW-1:0]     alog_sum;   // running sum over NON-ZERO elements
-reg [LIDX:0]               nz_cnt;     // how many non-zero (0..ARRAY_SIZE)
-reg                        blk_rdy_q;
-reg                        ovf_q, unf_q;   // held with the block
+// ---- per-column storage, filled in ST_COLLECT ----
+reg [LIDX:0]               idx;                     // next element slot to write (steps by 2)
+reg signed [ALOGW-1:0]     alog  [0:ARRAY_SIZE-1];  // absolute log of each element, log2|v|, fixed point
+reg                        sgn_r [0:ARRAY_SIZE-1];  // sign of each element
+reg                        zer_r [0:ARRAY_SIZE-1];  // zero flag of each element
+reg signed [ALOGW-1:0]     alog_sum;                // sum of alog over the non-zero elements
+reg [LIDX:0]               nz_cnt;                  // number of non-zero elements, 0..ARRAY_SIZE
+reg                        blk_rdy_q;               // block_ready pulse
+reg                        ovf_q, unf_q;            // exp_overflow / exp_underflow, held with the block
 
-// held output fields
+// ---- output block fields, registered in ST_ENCODE ----
 reg signed [EXP_WIDTH-1:0]       E_q;
 reg [SCALE_FACTOR_WIDTH-1:0]     scale_q;
 reg [MANT_BUS_WIDTH-1:0]         mant_q;
 reg [ARRAY_SIZE-1:0]             sign_q, zero_q;
 
 // ---------------------------------------------------------------------------
-// per-element decode of the two incoming accumulator values
-//   sign : the accumulator's sign bit
-//   zero : exactly zero (log2(0) is unrepresentable, so it travels as a flag)
-//   abs  : magnitude, which is what the log path must see.  Feeding the raw
-//          two's-complement word into a leading-one detector made a negative
-//          accumulator look enormous (bit DATA_WIDTH set).
+// STEP 1: sign, zero flag and absolute log of the two incoming elements
+//   sN : sign = top bit of Res_out
+//   zN : zero flag = Res_out is exactly 0 (log2(0) does not exist)
+//   aN : |Res_out|  (two's complement negate when negative; the log circuit
+//        needs the magnitude)
+//   lgN: log2|Res_out| in fixed point, from log_finder (Mitchell's method)
 // ---------------------------------------------------------------------------
 wire                  s0 = mant0[DATA_WIDTH];
 wire                  s1 = mant1[DATA_WIDTH];
@@ -142,16 +154,19 @@ wire [LOGW-1:0] lg0, lg1;
 log_finder #(.WIDTH(LOGW), .FRAC_BITS(FRAC_WIDTH)) lgf0(.shifted_mant(a0), .log_mant(lg0));
 log_finder #(.WIDTH(LOGW), .FRAC_BITS(FRAC_WIDTH)) lgf1(.shifted_mant(a1), .log_mant(lg1));
 
-// Absolute log of the VALUE, not of the raw accumulator word:
-//   value   = Res_out / 2^FRAC_WIDTH * 2^exp_m
-//   log2(v) = log2(Res_out) - FRAC_WIDTH + exp_m
-// all in FRAC_WIDTH fixed point.
+// alog = log2 of the element's real value, in FRAC_WIDTH fixed point:
+//   v       = Res_out / 2^FRAC_WIDTH * 2^exp_out
+//   log2|v| = log2|Res_out| - FRAC_WIDTH + exp_out
+// lg is the first term; (exp_out - FRAC_WIDTH) is an integer, so it is
+// shifted left by FRAC_WIDTH to line it up with the fixed-point fraction.
+// Example (FRAC_WIDTH = 8): Res_out = 1280, exp_out = 2  ->  v = 5 * 4 = 20.
+//   lg = 2624 (10.25),  (2 - 8) << 8 = -1536,  alog = 1088 = 4.25  (exact 4.32)
 function automatic signed [ALOGW-1:0] mk_alog(input [LOGW-1:0] lg,
                                              input signed [EXP_WIDTH:0] em);
     logic signed [ALOGW-1:0] lg_s, em_s;
     begin
-        lg_s   = $signed({{(ALOGW-LGW){1'b0}}, lg[LGW-1:0]});  // log is >= 0
-        em_s   = ALOGW'(em);                                    // sign-extends
+        lg_s   = $signed({{(ALOGW-LGW){1'b0}}, lg[LGW-1:0]});  // log2|Res_out| >= 0
+        em_s   = ALOGW'(em);                                    // sign-extended exp_out
         mk_alog = lg_s + ((em_s - ALOGW'(FRAC_WIDTH)) <<< FRAC_WIDTH);
     end
 endfunction
@@ -160,57 +175,105 @@ wire signed [ALOGW-1:0] alog0 = mk_alog(lg0, exp_m_1);
 wire signed [ALOGW-1:0] alog1 = mk_alog(lg1, exp_m_2);
 
 // ---------------------------------------------------------------------------
-// ENCODE combinational work: centre, size the scale factor, quantise.
+// STEP 2: E = round(mean of alog over the non-zero elements)
+//
+// The mean needs alog_sum / n, where n = nz_cnt (0..ARRAY_SIZE). There is no
+// divider and no multiplier: one result is built for every possible n with
+// shifts and adds only, and nz_cnt selects one. All results round down
+// (floor), like a >>> shift.
+//
+// HOW x / n IS DONE WITH SHIFTS            (x = alog_sum, sign-extended to PW)
+//   n = 2^k  : x / n = x >>> k                               exact, no gates
+//   n odd    : x / n ~= (x * R) >>> 16,   R = floor(2^16 / n)
+//              x * R is written as a few shifted copies of x added together
+//   n = m*2^k: (m odd) do x / m, then shift right k more: (x * R(m)) >>> (16+k)
+//
+// TABLE for n = 1 .. 16   ("err" = how much R / 2^16 is below 1/n, relative;
+//                          the mean comes out at most |mean| * err low, plus
+//                          1 unit from the floor)
+//   n  R      x * R as shifts and adds                         adds  err
+//   1  -      x                                                  0   exact
+//   2  -      x >>> 1                                            0   exact
+//   3  21845  m1 = x+(x<<<2); m2 = m1+(m1<<<4); m3 = m2+(m2<<<8)  3   0.0015%
+//             (21845 = 5*17*257), then >>> 16
+//   4  -      x >>> 2                                            0   exact
+//   5  13107  m1 = x+(x<<<1); m2 = m1+(m1<<<4); m3 = m2+(m2<<<8)  3   0.0015%
+//             (13107 = 3*17*257), then >>> 16
+//   6  -      (x / 3 product m3) >>> 17                          3   0.0015%
+//   7  9362   (x<<<13)+(x<<<10)+(x<<<7)+(x<<<4)+(x<<<1)           4   0.0031%
+//             then >>> 16
+//   8  -      x >>> 3                                            0   exact
+//   9  7281   (x<<<13)-(x<<<10)+(x<<<7)-(x<<<4)+x                 4   0.011%
+//             then >>> 16
+//  10  -      (x / 5 product m3) >>> 17                          3   0.0015%
+//  11  5957   (x<<<13)-(x<<<11)-(x<<<8)+(x<<<6)+(x<<<2)+x         5   0.014%
+//             then >>> 16
+//  12  -      (x / 3 product m3) >>> 18                          3   0.0015%
+//  13  5041   (x<<<12)+(x<<<10)-(x<<<6)-(x<<<4)+x                 4   0.0046%
+//             then >>> 16
+//  14  -      (x / 7 product) >>> 17                             4   0.0031%
+//  15  4369   m1 = x+(x<<<4); m2 = m1+(m1<<<8)                    2   0.0015%
+//             (4369 = 17*257), then >>> 16
+//  16  -      x >>> 4                                            0   exact
+//
+// ONLY n = 1..4 ARE BUILT BELOW, so ARRAY_SIZE must be <= 4 for now. A larger
+// ARRAY_SIZE stops elaboration with an error; to support it, add the cases
+// from the table above.
+//   RW : 16, the fraction bits of R (= FRAC_WIDTH + 8)
+//   PW : working width, wide enough for x * R
 // ---------------------------------------------------------------------------
-// E = round(mean of log2|v| over non-zeros), as an INTEGER exponent.
-// nz_cnt is not a power of two in general, so this is a real divide. It runs
-// ONCE PER BLOCK, not per element -- but for synthesis replace it with a
-// reciprocal multiply (recip[nz_cnt] is an ARRAY_SIZE-entry constant table).
-// DIVIDE-FREE mean.  nz_cnt is 0..ARRAY_SIZE, so instead of one variable
-// divider we build one CONSTANT multiply per possible count and mux the
-// results. Each constant multiply synthesises to shift-adds; for a power-of-two
-// count it collapses to a plain shift (/1 is free, /2 is >>1, /4 is >>2), and
-// only the non-power-of-two counts cost a short adder chain.
-// A single `alog_sum / nz_cnt` cost ~20k cells on its own.
-localparam RW = FRAC_WIDTH + 8;          // reciprocal fixed-point bits
-localparam PW = ALOGW + RW + 2;          // full width of sum * reciprocal
-wire signed [PW-1:0] mean_cand [0:ARRAY_SIZE];
+localparam RW = FRAC_WIDTH + 8;
+localparam PW = ALOGW + RW + 2;
+wire signed [PW-1:0] mean_cand [0:ARRAY_SIZE];   // mean_cand[n] = alog_sum / n
 genvar gi;
 generate
-    assign mean_cand[0] = '0;            // no non-zero elements: unused
+    assign mean_cand[0] = '0;            // n = 0 (all elements zero): E is unused
     for (gi = 1; gi <= ARRAY_SIZE; gi = gi + 1) begin : mean_g
-        // (1<<RW)/gi is folded at ELABORATION (gi is a genvar), so this is a
-        // multiply by a literal, not a divide.
-        localparam [RW:0] RECIP = (1 << RW) / gi;
-        // Verilog sizes a*b as max(width(a),width(b)), NOT the sum, so both
-        // operands must be widened to the full product width FIRST or the
-        // product truncates and >>> RW shifts the remainder away (E came out 0).
-        wire signed [PW-1:0] sum_ext  = {{(PW-ALOGW){alog_sum[ALOGW-1]}}, alog_sum};
-        wire signed [PW-1:0] rcp_ext  = {{(PW-RW-1){1'b0}}, RECIP};
-        wire signed [PW-1:0] prod     = sum_ext * rcp_ext;
-        assign mean_cand[gi] = (prod >>> RW);
+        // alog_sum sign-extended to PW bits
+        wire signed [PW-1:0] sum_ext = {{(PW-ALOGW){alog_sum[ALOGW-1]}}, alog_sum};
+        if (gi == 1) begin : div1
+            assign mean_cand[gi] = sum_ext;
+        end else if (gi == 2) begin : div2
+            assign mean_cand[gi] = sum_ext >>> 1;
+        end else if (gi == 3) begin : div3
+            // x * 21845 in 3 shift-and-add steps (21845 = 5 * 17 * 257):
+            //   m1 = x  * 5   = x  + (x  << 2)
+            //   m2 = m1 * 17  = m1 + (m1 << 4)
+            //   m3 = m2 * 257 = m2 + (m2 << 8)
+            // then >>> 16. Max |m3| < 2^20 * 2^15 = 2^35, inside PW bits.
+            wire signed [PW-1:0] m1 = sum_ext + (sum_ext <<< 2);
+            wire signed [PW-1:0] m2 = m1      + (m1      <<< 4);
+            wire signed [PW-1:0] m3 = m2      + (m2      <<< 8);
+            assign mean_cand[gi] = m3 >>> 16;
+        end else if (gi == 4) begin : div4
+            assign mean_cand[gi] = sum_ext >>> 2;
+        end else begin : div_missing
+            $error("format_convertor: no divide-by-%0d built (ARRAY_SIZE = %0d). Only n = 1..4 exist; add it from the STEP 2 table.", gi, ARRAY_SIZE);
+            assign mean_cand[gi] = '0;
+        end
     end
 endgenerate
-wire signed [ALOGW-1:0] mean_alog = mean_cand[nz_cnt[LIDX:0]][ALOGW-1:0];
-// round-to-nearest on the way down to an INTEGER exponent
+wire signed [ALOGW-1:0] mean_alog = mean_cand[nz_cnt[LIDX:0]][ALOGW-1:0];   // mean log, fixed point
+// round to the nearest integer: add 0.5, then drop the fraction bits
 wire signed [ALOGW-1:0] mean_rnd  = mean_alog + ALOGW'(1 << (FRAC_WIDTH-1));
-wire signed [ALOGW-1:0] mean_int  = mean_rnd >>> FRAC_WIDTH;
-// EXPONENT RANGE. The per-PE exponent is EXP_WIDTH+1 bits (sum of two block
-// exponents), but the block's E field is EXP_WIDTH, the same as the input
-// block. A centre outside [-2^(EXP_WIDTH-1), 2^(EXP_WIDTH-1)-1] cannot be
-// stored. It used to be SLICED (wrapped): 201 became -55, which forced the
-// residuals to absorb a 256-octave gap at scale 13 -- an unbounded error that
-// happened to be 18% on test 120. Clamping keeps E as close as the field allows
-// and the flag tells the controller the block is out of range.
+wire signed [ALOGW-1:0] mean_int  = mean_rnd >>> FRAC_WIDTH;               // E before clamping
+
+// E must fit EXP_WIDTH signed bits: E_MIN = -2^(EXP_WIDTH-1) .. E_MAX = 2^(EXP_WIDTH-1)-1.
+// The PE exponents are EXP_WIDTH+1 bits, so a column's mean can be outside that
+// range. It is then clamped to the nearest end (not wrapped) and flagged; the
+// block's values are only approximate in that case.
 localparam signed [ALOGW-1:0] EMAX_W =  (1 << (EXP_WIDTH-1)) - 1;
 localparam signed [ALOGW-1:0] EMIN_W = -(1 << (EXP_WIDTH-1));
 wire e_ovf = (mean_int > EMAX_W);
 wire e_unf = (mean_int < EMIN_W);
-wire signed [EXP_WIDTH-1:0] E_c   = e_ovf ? {1'b0, {(EXP_WIDTH-1){1'b1}}}     //  2^(W-1)-1
-                                  : e_unf ? {1'b1, {(EXP_WIDTH-1){1'b0}}}     // -2^(W-1)
+wire signed [EXP_WIDTH-1:0] E_c   = e_ovf ? {1'b0, {(EXP_WIDTH-1){1'b1}}}     // E_MAX
+                                  : e_unf ? {1'b1, {(EXP_WIDTH-1){1'b0}}}     // E_MIN
                                   : mean_int[EXP_WIDTH-1:0];
 
-// residual logs about that centre, still in FRAC_WIDTH fixed point
+// ---------------------------------------------------------------------------
+// STEP 3: residual of each element = how far its log is from E (fixed point)
+//   resid = alog - E * 2^FRAC_WIDTH
+// ---------------------------------------------------------------------------
 wire signed [ALOGW-1:0] resid [0:ARRAY_SIZE-1];
 genvar g;
 generate
@@ -219,21 +282,21 @@ generate
     end
 endgenerate
 
-// The scale factor is the smallest s for which every residual fits the signed
-// BLOCK_MANTISSA_WIDTH field [LMIN, LMAX] = [-2^(W-1), 2^(W-1)-1] after
-// quantisation by 2^s. The field is ASYMMETRIC, so the positive and negative
-// extremes are tested against their OWN limits:
-//     max positive residual  <= LMAX    << s
-//     max negative magnitude <= |LMIN|  << s
-// With round-to-nearest, a residual >= LMIN<<s still quantises to >= LMIN, so
-// the negative bound is exact.
-// BUG FIXED: both signs used to be tested against LMAX<<s. A residual of
-// exactly -32<<5 (test 136: 0.5 next to values ~27) was rejected at s=5 and
-// forced s=6, doubling the step for the whole block (25.56 -> 22.63, 10.7%).
-// The tb's input-block encoder already used the exact range, so the input and
-// output encoders now agree.
-reg signed [ALOGW-1:0] need_p;   // largest positive residual
-reg signed [ALOGW-1:0] need_n;   // largest negative residual, as a magnitude
+// ---------------------------------------------------------------------------
+// STEP 4: scale = the smallest s for which every residual fits in L
+//
+// After dividing by 2^s, L must lie in L_MIN..L_MAX. The signed field reaches
+// one step further below zero than above it, so each side is checked
+// against its own limit:
+//     largest positive residual            <= L_MAX  * 2^s
+//     largest negative residual (magnitude) <= |L_MIN| * 2^s
+// Smallest s = finest step = least rounding error.
+// If nothing fits, scale = SCALE_MAX and STEP 5 saturates the out-of-range L.
+//   need_p : largest positive residual of the non-zero elements
+//   need_n : largest negative residual, as a positive number
+// ---------------------------------------------------------------------------
+reg signed [ALOGW-1:0] need_p;
+reg signed [ALOGW-1:0] need_n;
 reg [SCALE_FACTOR_WIDTH-1:0] scale_c;
 integer m, sidx;
 always @(*) begin
@@ -247,20 +310,25 @@ always @(*) begin
                 if (resid[m] > need_p)    need_p = resid[m];
             end
         end
-    scale_c = {SCALE_FACTOR_WIDTH{1'b1}};          // saturate if nothing fits
+    scale_c = {SCALE_FACTOR_WIDTH{1'b1}};          // SCALE_MAX if nothing fits
     for (sidx = (1 << SCALE_FACTOR_WIDTH) - 1; sidx >= 0; sidx = sidx - 1)
         if ((need_p <= ALOGW'(((1 << (BLOCK_MANTISSA_WIDTH-1)) - 1) << sidx)) &&
             (need_n <= ALOGW'(  (1 << (BLOCK_MANTISSA_WIDTH-1))      << sidx)))
             scale_c = sidx[SCALE_FACTOR_WIDTH-1:0];
 end
 
-// quantise each residual by the chosen scale, round to nearest, then saturate
+// ---------------------------------------------------------------------------
+// STEP 5: L = round(resid / 2^scale), saturated to L_MIN..L_MAX
+//   q_wide : the rounded quotient at full width (add half a step, then shift)
+//   q_sat  : q_wide limited to the L field
+// Rounding to nearest keeps the error within half a step:
+//   |log error| <= 2^scale / 2^(FRAC_WIDTH+1) octave
+// ---------------------------------------------------------------------------
 reg signed [ALOGW-1:0]              q_wide [0:ARRAY_SIZE-1];
 reg signed [BLOCK_MANTISSA_WIDTH-1:0] q_sat [0:ARRAY_SIZE-1];
 integer n;
 always @(*) begin
     for (n = 0; n < ARRAY_SIZE; n = n + 1) begin
-        // round-to-nearest: add half a step before the arithmetic shift
         q_wide[n] = (scale_c == 0) ? resid[n]
                   : ((resid[n] + (ALOGW'(1) <<< (scale_c - 1))) >>> scale_c);
         if      (q_wide[n] >  LMAX) q_sat[n] = LMAX[BLOCK_MANTISSA_WIDTH-1:0];
@@ -275,14 +343,13 @@ end
 integer p;
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        state              <= ST_EXP;
+        state              <= ST_COLLECT;
         idx                <= 0;
         alog_sum           <= 0;
         nz_cnt             <= 0;
         blk_rdy_q          <= 0;
         ovf_q              <= 1'b0;
         unf_q              <= 1'b0;
-        max_exp_calculated <= 0;
         E_q                <= 0;
         scale_q            <= 0;
         mant_q             <= 0;
@@ -297,23 +364,8 @@ always @(posedge clk or negedge rst_n) begin
         blk_rdy_q <= 1'b0;
 
         case (state)
-        // iface sends an exponent pre-pass before the mantissas; this encoder
-        // does not need it (it uses the per-element exp_m that arrives WITH
-        // each mantissa), but iface waits on max_exp_calculated to advance.
-        ST_EXP: begin
-            if (exp_valid && last_exp_sent) begin
-                max_exp_calculated <= 1'b1;
-                idx                <= 0;
-                alog_sum           <= 0;
-                nz_cnt             <= 0;
-                state              <= ST_COLLECT;
-            end else begin
-                max_exp_calculated <= 1'b0;
-            end
-        end
-
+        // two elements per clock: store them, add the non-zero ones to the sum
         ST_COLLECT: begin
-            max_exp_calculated <= 1'b0;
             if (mantissa_valid) begin
                 alog [idx[LIDX-1:0]]   <= alog0;
                 sgn_r[idx[LIDX-1:0]]   <= s0;
@@ -336,7 +388,7 @@ always @(posedge clk or negedge rst_n) begin
             end
         end
 
-        // one cycle to let alog[]/alog_sum/nz_cnt settle, then latch the block
+        // the stored column is complete: register the block computed by STEPS 2-5
         ST_ENCODE: begin
             E_q     <= E_c;
             ovf_q   <= e_ovf;
@@ -344,22 +396,26 @@ always @(posedge clk or negedge rst_n) begin
             scale_q <= scale_c;
             for (p = 0; p < ARRAY_SIZE; p = p + 1) begin
                 mant_q[p*BLOCK_MANTISSA_WIDTH +: BLOCK_MANTISSA_WIDTH]
-                        <= zer_r[p] ? {BLOCK_MANTISSA_WIDTH{1'b0}}
+                        <= zer_r[p] ? {BLOCK_MANTISSA_WIDTH{1'b0}}      // zero element: L = 0
                                     : q_sat[p][BLOCK_MANTISSA_WIDTH-1:0];
                 sign_q[p] <= sgn_r[p];
                 zero_q[p] <= zer_r[p];
             end
             blk_rdy_q <= 1'b1;
-            state     <= ST_EXP;
+            // clear the column state for the next column
+            idx       <= 0;
+            alog_sum  <= 0;
+            nz_cnt    <= 0;
+            state     <= ST_COLLECT;
         end
 
-        default: state <= ST_EXP;
+        default: state <= ST_COLLECT;
         endcase
     end
 end
 
 // ---------------------------------------------------------------------------
-// outputs
+// outputs (unused top bits of the byte-aligned block are 0)
 // ---------------------------------------------------------------------------
 assign block_out = { {(BLOCK_WIDTH-BLOCK_BITS){1'b0}},
                      E_q, scale_q, sign_q, zero_q, mant_q };
@@ -374,4 +430,3 @@ assign exp_overflow  = ovf_q;
 assign exp_underflow = unf_q;
 
 endmodule
-

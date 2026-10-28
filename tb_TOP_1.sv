@@ -1,24 +1,50 @@
 `timescale 1ns/1ps
 //=============================================================================
-// tb_TOP_1.sv -- 20-test floating-point regression suite
-//                (blocks -> edge_reg_bank -> systolic_array -> iface -> FC)
+// tb_TOP_1.sv  --  main testbench of the core (top_module), 140 tests
 //
-// Every test is a RAW 4x4 A and 4x4 B written out explicitly. Each test does:
-//     reset -> encode+load blocks -> run -> compare -> report
+// WHAT IT DOES
+//   Each test is a 4x4 A and a 4x4 B of real numbers written out explicitly.
+//   For each test:
+//     reset -> encode A's rows and B's columns into blocks (make_block, the
+//     same encoding the software driver must use) -> load all 8 blocks in one
+//     clock -> wait 200 clocks -> check -> report
 //
-// Block encoding (done here, mirroring what the SW driver must do):
-//     log   = round(log2(v) * 256)                  8.8 fixed point
-//     scale = smallest s in 0..15 with all (log>>s) <= 31
-//     mant  = round(log / 2^s)                       5 bits each
-//     block = {exp[31:24], scale[23:20], m3,m2,m1,m0 [19:0]}   m0 in LSBs
-// HW descaler reconstructs mant<<scale and reads it as 8.8.
+// BLOCK ENCODING (make_block)
+//   sign = v < 0, zero = v == 0
+//   E    = round(mean of log2|v| over the non-zero elements)
+//   L    = round((round(log2|v| * 2^FRAC_WIDTH) - E * 2^FRAC_WIDTH) / 2^scale),
+//          scale = the smallest that fits every L in BLOCK_MANTISSA_WIDTH bits
+//   Row lane i gets row i of A; column lane j gets column j of B.
 //
-// Row lane i gets A[i][0..3];  col lane j gets B[0..3][j].
-// Res_out = 256 * true product.
+// CHECKS (a test FAILS if any fails)
+//   Res_out   : C[i][j] = Res_out / 2^FRAC_WIDTH * 2^(E_row + E_col), compared
+//               with the exact A x B; error / sum|terms| must be <= 10%
+//               (this measure is not fooled by cancellation)
+//   exponent  : the hardware exp_out must equal E_row + E_col
+//   blocks    : the 4 output blocks, decoded, must be within 10% of the
+//               largest |C| in their column, and exp_overflow / underflow
+//               must match an ideal software encoding of the exact C
+//               (E / scale / L differences are reported, not failed: the
+//               hardware log is approximate)
+//   overflow  : every PE whose inputs must overflow must raise pe_overflow
 //
-// Difficulty ramps T1 -> T20: exact powers of two, near-1 floats, mid-range,
-// larger values, then wide dynamic range inside one block (worst case for the
-// shared scale factor).
+// OUTPUT
+//   terminal       : one line per test + a summary
+//   test_report.txt: matrices, results, errors, block check, per test
+//   TOP_1_tb.vcd   : waveform
+//
+// TESTS
+//   1-26 hand-made (powers of two, near 1, mid range, wide range, signs),
+//   27-136 random families and probes (benign, near 1, below 1, signed,
+//   NN-like weights, heavy tails, wide 1e-2..1e2 and 1e-4..1e4, spread inside
+//   a block, small-product margins, cancellation, overflow probes),
+//   137-140 columns with 1, 2 and 3 non-zero results (every divide path of
+//   format_convertor).
+//   Expected at the default parameters: 125 pass. The 15 failures (62, 65,
+//   78, 80-93) have a very wide range of values inside one block (wide-range
+//   and heavy-tail data), more than a 6-bit L can hold accurately.
+//
+// LIMITATION: the stimulus is 4x4, so ARRAY_SIZE must be 4.
 //=============================================================================
 module tb_TOP_1;
     parameter DATA_WIDTH=32, EXP_WIDTH=8, MANTISSA_WIDTH=16, FRAC_WIDTH=8, ARRAY_SIZE=4;
@@ -40,12 +66,11 @@ module tb_TOP_1;
     reg [BW-1:0] row_block [ARRAY_SIZE-1:0], col_block [ARRAY_SIZE-1:0];
 
     wire [ARRAY_SIZE-1:0] valid_out [ARRAY_SIZE-1:0];
-    wire valid_exp_out, valid_man_out, last_exp_sent, mantissas_sent_out;
-    wire block_ready, max_exp_calculated, bank_primed;
-    wire [EXP_WIDTH:0]   exponent_out_1, exponent_out_2, exp_m_out_1, exp_m_out_2;   // per-PE exponent path: EXP_WIDTH+1
+    wire valid_man_out, mantissas_sent_out;
+    wire block_ready, bank_primed;
+    wire [EXP_WIDTH:0]   exp_m_out_1, exp_m_out_2;   // per-PE exponent path: EXP_WIDTH+1
     wire [EXP_WIDTH-1:0] max_exp;                                                      // block E field: EXP_WIDTH
     wire signed [DATA_WIDTH:0] mantissa_out_1, mantissa_out_2;
-    wire [1:0] iface_state_out;
     wire set_i_ready [ARRAY_SIZE-1:0];
     wire signed [DATA_WIDTH:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];
     wire [SCALE_FACTOR_WIDTH-1:0] scale_factor;
@@ -53,6 +78,8 @@ module tb_TOP_1;
     wire [ARRAY_SIZE-1:0] sign_out, zero_out;  // per-element sign / zero
     wire [BW-1:0] block_out;                   // SAME format as row_block/col_block
     wire exp_overflow, exp_underflow;          // output block E clamped (out of range)
+    wire [ARRAY_SIZE*ARRAY_SIZE-1:0] pe_overflow;  // sticky per-PE overflow, PE[i][j] at i*ARRAY_SIZE+j
+    wire acc_overflow;                         // OR of pe_overflow
     wire signed [EXP_WIDTH:0] exp_out_hw [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0];   // per-PE exponent from HW
 
     top_module #(
@@ -66,17 +93,17 @@ module tb_TOP_1;
     ) uut (
         .clk(clk), .rst_n(rst_n),
         .row_we(row_we), .col_we(col_we), .row_block(row_block), .col_block(col_block),
-        .valid_out(valid_out), .valid_exp_out(valid_exp_out),
-        .exponent_out_1(exponent_out_1), .exponent_out_2(exponent_out_2),
+        .valid_out(valid_out),
         .mantissa_out_1(mantissa_out_1), .mantissa_out_2(mantissa_out_2),
         .exp_m_out_1(exp_m_out_1), .exp_m_out_2(exp_m_out_2),
         .valid_man_out(valid_man_out), .set_i_ready(set_i_ready),
-        .iface_state_out(iface_state_out), .Res_out(Res_out),
-        .last_exp_sent(last_exp_sent), .mantissas_sent_out(mantissas_sent_out),
+        .Res_out(Res_out),
+        .mantissas_sent_out(mantissas_sent_out),
         .block_ready(block_ready), .scale_factor(scale_factor), .max_exp(max_exp),
-        .mantissa_out(mantissa_out), .max_exp_calculated(max_exp_calculated),
+        .mantissa_out(mantissa_out),
         .block_out(block_out), .sign_out(sign_out), .zero_out(zero_out),
         .exp_overflow(exp_overflow), .exp_underflow(exp_underflow),
+        .pe_overflow(pe_overflow), .acc_overflow(acc_overflow),
         .exp_out(exp_out_hw),
         .bank_primed(bank_primed)
     );
@@ -90,11 +117,10 @@ module tb_TOP_1;
     reg [SCALE_FACTOR_WIDTH-1:0] sf_row, sf_col;
     integer E_row [0:3], E_col [0:3];   // shared exponent chosen per lane
 
-    // ---------------- block encoder (mirrors the SW driver) ----------------
-    // v = (-1)^s_v * 2^E * 2^L
-    //   E = round(mean(log2|v|))          shared, signed  -> keeps L small
-    //   L = log2|v| - E                   per element, signed, 8.8 fixed point
-    //   L is stored as  mant<<scale  with mant 6-bit TWO'S COMPLEMENT
+    // ---------------- block encoder (the software driver must do the same) ----------------
+    // v = (-1)^sign * 2^(E + L * 2^scale / 2^FRAC_WIDTH)
+    //   E = round(mean(log2|v|)) over the non-zero elements (shared, signed)
+    //   L = (log2|v| - E) in FRAC_WIDTH fixed point, divided by 2^scale and rounded
     function real absr(input real v); begin absr = (v<0.0) ? -v : v; end endfunction
 
     function integer log8p8(input real v);   // round(log2(v)*256), v>0
@@ -113,11 +139,9 @@ module tb_TOP_1;
         end
     endfunction
 
-    // smallest scale s.t. every L fits 6-bit two's complement (-32..+31)
-    // Zero elements must not constrain the shared scale -- their L is a dummy.
-    // largest scale the SCALE_FACTOR_WIDTH field can hold (was hardcoded 15,
-    // which broke the SCALE_FACTOR_WIDTH knob: at width 2 the tb could pick a
-    // scale that does not fit the field)
+    // pick_scale_m: smallest scale s for which every L fits LMIN..LMAX.
+    // Zero elements (act = 0) do not count: their L is a dummy 0.
+    // SMAX: largest scale the SCALE_FACTOR_WIDTH field can hold.
     localparam SMAX = (1 << SCALE_FACTOR_WIDTH) - 1;
 
     function integer pick_scale_m(input integer l0,l1,l2,l3, input [3:0] act);
@@ -206,9 +230,6 @@ module tb_TOP_1;
     task clrwe; integer w; begin for(w=0;w<4;w=w+1) begin row_we[w]=0; col_we[w]=0; end end endtask
 
     // ---------------- one test: reset, load, multiply, check ----------------
-    // NOTE: erow/ecol used to be arguments here and were never referenced in
-    // the body. They were fed 8'hNN literals at all 26 call sites, which made
-    // -GEXP_WIDTH=12 fail to build (8-bit const into a 12-bit arg). Removed.
     task run_test(input integer id, input [8*44:1] name);
         real tot_err, a, e, d, sacc, cnd, wcond, tm;
         integer bad, sflip;
@@ -262,7 +283,7 @@ module tb_TOP_1;
                 end
             end
             t_id=id; t_name=name; t_cond=wcond; t_flip=sflip;
-            fc_check; account;
+            fc_check; pe_ovf_check; account;
             make_txt;
             t_nstr = $sformatf("%0s", name);
             $display("  %4d | %-32s | %8.3f%% | %2d  | %2d  | %8.3f%% | %0s",
@@ -303,7 +324,16 @@ module tb_TOP_1;
     real    fc_nerr [0:3][0:3];        // |decoded - expected C| / max|expected C in column|
     integer m_E, m_S, m_L, m_SG, m_Z, m_OV, m_UN;   // field mismatches this test
     integer t_fcval;                   // values over the 10% tolerance this test
+    // ---- PE overflow check state ----
+    integer ov_hw   [0:3][0:3];        // pe_overflow from the hardware
+    integer ov_need [0:3][0:3];        // 1 if some product MUST overflow (from the input blocks)
+    integer t_ovf_hw, t_ovf_miss;      // PEs flagged / must-flag PEs not flagged, this test
+    integer c_ovf, c_ovf_miss;         // tests with a flag / tests with a missed flag, whole run
     integer c_oor;                 // blocks flagged out of range, whole run
+    // non-zero-count coverage: cov_n[n] = output blocks that had n non-zero
+    // elements (hardware zero flags). format_convertor divides by n to get E,
+    // with a separate circuit for each n, so every n = 1..4 must be exercised.
+    integer cov_n [0:4];
     reg     fc_n_bad;              // set if the number of blocks produced != ARRAY_SIZE
     reg     t_fail;                // this test failed ANY check
     integer c_res, c_exp, c_fc;    // per-check failure counts, whole run
@@ -315,9 +345,8 @@ module tb_TOP_1;
     // ======================================================================
     // OUTPUT BLOCK CAPTURE
     // format_convertor emits one packed output block per column, flagged by
-    // block_ready. Nothing in this testbench looked at max_exp/scale_factor/
-    // mantissa_out before, so the whole format-conversion path was untested.
-    // Capture every block as it is produced; fc_n counts how many arrived.
+    // block_ready. Every block is captured as it is produced; fc_n counts how
+    // many arrived.
     // ======================================================================
     localparam MAX_BLK = 16;
     integer                       fc_n;
@@ -392,7 +421,7 @@ module tb_TOP_1;
     endtask
 
     task fc_check;
-        integer b, m, lraw;
+        integer b, m, lraw, nzh;
         real    ev, dv, lgv, mx, d, nrm;
         reg     skip;
         begin
@@ -406,6 +435,9 @@ module tb_TOP_1;
                 skip = x_ovf[b] || x_unf[b];          // ideal block itself out of range
                 if (skip) t_fcoor = t_fcoor + 1;
                 if (b < fc_n) begin
+                    nzh = 0;
+                    for (m = 0; m < 4; m = m + 1) if (!fc_zero[b][m]) nzh = nzh + 1;
+                    cov_n[nzh] = cov_n[nzh] + 1;
                     if (fc_exp[b]   != x_E[b])   m_E  = m_E  + 1;
                     if (fc_scale[b] != x_S[b])   m_S  = m_S  + 1;
                     if (fc_ovf[b]   != x_ovf[b]) m_OV = m_OV + 1;
@@ -445,13 +477,51 @@ module tb_TOP_1;
     endtask
 
     // One place that decides pass/fail, so run_test and run_case cannot drift.
-    // (Before this, an exponent-only failure printed FAIL but was never counted.)
+    // ======================================================================
+    // PE OVERFLOW CHECK
+    // A product overflows its DATA_WIDTH register when k = floor(L_row + L_col)
+    // is at least DATA_WIDTH - FRAC_WIDTH (the antilog A is >= 2^FRAC_WIDTH, so
+    // A << k needs at least FRAC_WIDTH + 1 + k bits). k is computed exactly from
+    // the input blocks as the PE sees them (L << scale, in 1/2^FRAC units).
+    // Every such PE MUST raise pe_overflow. A flag without a must-flag is
+    // allowed: the accumulator can overflow on its own (Limit 4, sum form).
+    // ======================================================================
+    function integer lbus(input [BW-1:0] blk, input integer idx);   // L << scale, signed
+        integer l, sc;
+        begin
+            l  = 32'(blk[MANT_LSB + idx*BLOCK_MANTISSA_WIDTH +: BLOCK_MANTISSA_WIDTH]);
+            if (l >= (1 << (BLOCK_MANTISSA_WIDTH-1))) l = l - (1 << BLOCK_MANTISSA_WIDTH);
+            sc = 32'(blk[SCALE_LSB +: SCALE_FACTOR_WIDTH]);
+            lbus = l * (1 << sc);
+        end
+    endfunction
+
+    task pe_ovf_check;
+        integer i4, j4, k4, ksum;
+        begin
+            t_ovf_hw = 0; t_ovf_miss = 0;
+            for (i4 = 0; i4 < 4; i4 = i4 + 1) for (j4 = 0; j4 < 4; j4 = j4 + 1) begin
+                ov_hw[i4][j4]   = pe_overflow[i4*ARRAY_SIZE + j4] ? 1 : 0;
+                ov_need[i4][j4] = 0;
+                for (k4 = 0; k4 < 4; k4 = k4 + 1)
+                    if (!row_block[i4][ZERO_LSB + k4] && !col_block[j4][ZERO_LSB + k4]) begin
+                        ksum = (lbus(row_block[i4], k4) + lbus(col_block[j4], k4)) >>> FRAC_WIDTH;
+                        if (ksum >= DATA_WIDTH - FRAC_WIDTH) ov_need[i4][j4] = 1;
+                    end
+                t_ovf_hw = t_ovf_hw + ov_hw[i4][j4];
+                if ((ov_need[i4][j4] != 0) && (ov_hw[i4][j4] == 0)) t_ovf_miss = t_ovf_miss + 1;
+            end
+            if (t_ovf_hw   != 0) c_ovf      = c_ovf + 1;
+            if (t_ovf_miss != 0) c_ovf_miss = c_ovf_miss + 1;
+        end
+    endtask
+
     task account;
         begin
             if (t_cond > 0.10)  c_res = c_res + 1;
             if (t_experr != 0)  c_exp = c_exp + 1;
             if (t_fcerr  != 0)  c_fc  = c_fc  + 1;
-            t_fail = (t_cond > 0.10) || (t_experr != 0) || (t_fcerr != 0);
+            t_fail = (t_cond > 0.10) || (t_experr != 0) || (t_fcerr != 0) || (t_ovf_miss != 0);
         end
     endtask
 
@@ -506,6 +576,17 @@ module tb_TOP_1;
             $fwrite(fh,"    exponent mismatches : %0d of 16  %0s\n",
                     t_experr, (t_experr==0)?"(OK)":"(*** MISMATCH ***)");
 
+            $fwrite(fh,"\n  PE OVERFLOW CHECK   pe_overflow (hardware)  vs  must-flag (from the input blocks)\n");
+            $fwrite(fh,"  ------------------------------------------------------\n");
+            for(i3=0;i3<4;i3=i3+1)
+                $fwrite(fh,"   got  [ %5d %5d %5d %5d ]     must [ %5d %5d %5d %5d ]\n",
+                    ov_hw[i3][0],ov_hw[i3][1],ov_hw[i3][2],ov_hw[i3][3],
+                    ov_need[i3][0],ov_need[i3][1],ov_need[i3][2],ov_need[i3][3]);
+            $fwrite(fh,"    flagged : %0d of 16   missed : %0d  %0s\n", t_ovf_hw, t_ovf_miss,
+                    (t_ovf_miss==0)?"(OK)":"(*** MISSED OVERFLOW ***)");
+            if (t_ovf_hw != 0)
+                $fwrite(fh,"    flagged PEs hold invalid results (top bits lost); a flag with must = 0 is an accumulator overflow\n");
+
             fc_dump;
 
             $fwrite(fh,"\n  SUMMARY\n");
@@ -517,6 +598,7 @@ module tb_TOP_1;
             $fwrite(fh,"    block values over 10%%       : %0d of 16\n", t_fcval);
             $fwrite(fh,"    worst block error           : %.3f %%\n", t_fc_norm*100.0);
             $fwrite(fh,"    exp_overflow/underflow wrong: %0d\n", m_OV + m_UN);
+            $fwrite(fh,"    PE overflow flagged / missed: %0d / %0d\n", t_ovf_hw, t_ovf_miss);
             $fwrite(fh,"    tolerance                   : 10.000 %%\n");
             $fwrite(fh,"    VERDICT                     : %0s\n", t_fail ? "FAIL" : "PASS");
             $fwrite(fh,"\n");
@@ -633,7 +715,7 @@ module tb_TOP_1;
             end
 
             t_id=id; t_name=name; t_cond=wc; t_flip=sf;
-            fc_check; account;
+            fc_check; pe_ovf_check; account;
             make_txt;
 
             s_run = s_run+1; s_sum = s_sum+wc;
@@ -652,7 +734,8 @@ module tb_TOP_1;
     initial begin
         clrwe; ntests=0; nfail=0; acc_sum=0.0;
         s_run=0; s_fail=0; s_flip=0; s_experr=0; s_worst=0.0; s_sum=0.0;
-        c_res=0; c_exp=0; c_fc=0; c_oor=0; t_fcoor=0; s_fcworst=0.0; fc_n_bad=1'b0; t_fcerr=0; t_fail=1'b0;
+        for (i=0;i<5;i=i+1) cov_n[i]=0;
+        c_res=0; c_exp=0; c_fc=0; c_oor=0; c_ovf=0; c_ovf_miss=0; t_ovf_hw=0; t_ovf_miss=0; t_fcoor=0; s_fcworst=0.0; fc_n_bad=1'b0; t_fcerr=0; t_fail=1'b0;
         fh = $fopen("test_report.txt","w");
         if (fh == 0) begin $display("ERROR: cannot open test_report.txt"); $finish; end
         $fwrite(fh,"================================================================================\n");
@@ -892,7 +975,7 @@ module tb_TOP_1;
         run_test(20, "extreme spread unique");
 
 
-        // ================= SIGNED / SUB-1 TESTS (new) =================
+        // ================= SIGNED / SUB-1 TESTS =================
 
         // ---------------- T21: all negative ----------------
         Afp[0][0]=-1.50; Afp[0][1]=-2.50; Afp[0][2]=-3.50; Afp[0][3]=-4.50;
@@ -2169,6 +2252,58 @@ module tb_TOP_1;
         Bfp[2][0]=2.506000000; Bfp[2][1]=-3.197000000; Bfp[2][2]=-2.397000000; Bfp[2][3]=-2.595000000;
         Bfp[3][0]=-1.699000000; Bfp[3][1]=-1.530000000; Bfp[3][2]=1.322000000; Bfp[3][3]=-1.702000000;
         run_case(136, "cancellation risk signed");
+
+        // ================= NON-ZERO COUNT TESTS =================
+        // format_convertor takes E as the mean log over the NON-ZERO elements
+        // of each output column, so it divides by n = 1, 2, 3 or 4. The tests
+        // above only ever produce n = 4 (or an all-zero column). These make
+        // columns of C with 1, 2 and 3 non-zero elements.
+
+        // ---- Test 137: one column per n (diagonal A) ----
+        // A diagonal -> C[i][j] = A[i][i] * B[i][j], so C has zeros exactly
+        // where B has them: column 0 n=3, column 1 n=2, column 2 n=1, column 3 n=4
+        Afp[0][0]=1.500000000; Afp[0][1]=0.0; Afp[0][2]=0.0; Afp[0][3]=0.0;
+        Afp[1][0]=0.0; Afp[1][1]=-2.250000000; Afp[1][2]=0.0; Afp[1][3]=0.0;
+        Afp[2][0]=0.0; Afp[2][1]=0.0; Afp[2][2]=3.000000000; Afp[2][3]=0.0;
+        Afp[3][0]=0.0; Afp[3][1]=0.0; Afp[3][2]=0.0; Afp[3][3]=0.750000000;
+        Bfp[0][0]=2.000000000; Bfp[0][1]=0.0; Bfp[0][2]=0.0; Bfp[0][3]=1.100000000;
+        Bfp[1][0]=0.0; Bfp[1][1]=1.750000000; Bfp[1][2]=0.0; Bfp[1][3]=2.200000000;
+        Bfp[2][0]=1.250000000; Bfp[2][1]=0.0; Bfp[2][2]=4.000000000; Bfp[2][3]=-3.300000000;
+        Bfp[3][0]=3.500000000; Bfp[3][1]=2.500000000; Bfp[3][2]=0.0; Bfp[3][3]=0.900000000;
+        run_case(137, "nonzero count n=3,2,1,4");
+
+        // ---- Test 138: one zero row in A -> every column n=3 ----
+        Afp[0][0]=1.200000000; Afp[0][1]=2.500000000; Afp[0][2]=0.800000000; Afp[0][3]=3.100000000;
+        Afp[1][0]=2.000000000; Afp[1][1]=1.100000000; Afp[1][2]=1.700000000; Afp[1][3]=0.600000000;
+        Afp[2][0]=0.0; Afp[2][1]=0.0; Afp[2][2]=0.0; Afp[2][3]=0.0;
+        Afp[3][0]=0.900000000; Afp[3][1]=3.300000000; Afp[3][2]=2.200000000; Afp[3][3]=1.400000000;
+        Bfp[0][0]=1.300000000; Bfp[0][1]=0.700000000; Bfp[0][2]=2.100000000; Bfp[0][3]=1.800000000;
+        Bfp[1][0]=2.400000000; Bfp[1][1]=1.600000000; Bfp[1][2]=0.900000000; Bfp[1][3]=1.200000000;
+        Bfp[2][0]=0.500000000; Bfp[2][1]=2.800000000; Bfp[2][2]=1.500000000; Bfp[2][3]=2.600000000;
+        Bfp[3][0]=1.700000000; Bfp[3][1]=1.100000000; Bfp[3][2]=3.000000000; Bfp[3][3]=0.800000000;
+        run_case(138, "nonzero count n=3 (zero row)");
+
+        // ---- Test 139: two zero rows in A -> every column n=2 ----
+        Afp[0][0]=0.0; Afp[0][1]=0.0; Afp[0][2]=0.0; Afp[0][3]=0.0;
+        Afp[1][0]=2.000000000; Afp[1][1]=-1.100000000; Afp[1][2]=1.700000000; Afp[1][3]=0.600000000;
+        Afp[2][0]=0.0; Afp[2][1]=0.0; Afp[2][2]=0.0; Afp[2][3]=0.0;
+        Afp[3][0]=0.900000000; Afp[3][1]=3.300000000; Afp[3][2]=2.200000000; Afp[3][3]=1.400000000;
+        Bfp[0][0]=1.300000000; Bfp[0][1]=0.700000000; Bfp[0][2]=2.100000000; Bfp[0][3]=1.800000000;
+        Bfp[1][0]=2.400000000; Bfp[1][1]=1.600000000; Bfp[1][2]=0.900000000; Bfp[1][3]=1.200000000;
+        Bfp[2][0]=0.500000000; Bfp[2][1]=2.800000000; Bfp[2][2]=1.500000000; Bfp[2][3]=2.600000000;
+        Bfp[3][0]=1.700000000; Bfp[3][1]=1.100000000; Bfp[3][2]=3.000000000; Bfp[3][3]=0.800000000;
+        run_case(139, "nonzero count n=2 (2 zero rows)");
+
+        // ---- Test 140: three zero rows in A -> every column n=1 ----
+        Afp[0][0]=0.0; Afp[0][1]=0.0; Afp[0][2]=0.0; Afp[0][3]=0.0;
+        Afp[1][0]=0.0; Afp[1][1]=0.0; Afp[1][2]=0.0; Afp[1][3]=0.0;
+        Afp[2][0]=1.200000000; Afp[2][1]=2.500000000; Afp[2][2]=0.800000000; Afp[2][3]=-3.100000000;
+        Afp[3][0]=0.0; Afp[3][1]=0.0; Afp[3][2]=0.0; Afp[3][3]=0.0;
+        Bfp[0][0]=1.300000000; Bfp[0][1]=0.700000000; Bfp[0][2]=2.100000000; Bfp[0][3]=1.800000000;
+        Bfp[1][0]=2.400000000; Bfp[1][1]=1.600000000; Bfp[1][2]=0.900000000; Bfp[1][3]=1.200000000;
+        Bfp[2][0]=0.500000000; Bfp[2][1]=2.800000000; Bfp[2][2]=1.500000000; Bfp[2][3]=2.600000000;
+        Bfp[3][0]=1.700000000; Bfp[3][1]=1.100000000; Bfp[3][2]=3.000000000; Bfp[3][3]=0.800000000;
+        run_case(140, "nonzero count n=1 (3 zero rows)");
         $display(" ------------------------------------------------------------------------------------");
         $display("");
         $display(" ============================ OVERALL SUMMARY ============================");
@@ -2178,7 +2313,12 @@ module tb_TOP_1;
         $display("     Res_out  >10%% cond-err : %0d", c_res);
         $display("     exponent mismatches    : %0d", c_exp);
         $display("     output-block errors    : %0d", c_fc);
+        $display("     missed PE overflows    : %0d", c_ovf_miss);
+        $display("   tests with PE overflow flagged: %0d", c_ovf);
         $display("   blocks flagged out of range: %0d  (E clamped, reported, not a failure)", c_oor);
+        $display("   blocks by non-zero count: n=0:%0d  n=1:%0d  n=2:%0d  n=3:%0d  n=4:%0d  %0s",
+                 cov_n[0], cov_n[1], cov_n[2], cov_n[3], cov_n[4],
+                 (cov_n[1]!=0 && cov_n[2]!=0 && cov_n[3]!=0 && cov_n[4]!=0) ? "(all divide paths used)" : "(*** SOME DIVIDE PATH NOT USED ***)");
         $display("   tests with sign flips  : %0d", s_flip);
         $display("   tests w/ exponent errors: %0d", s_experr);
         $display("   worst cond-err         : %.3f%%", (s_worst>0.0?s_worst:0.0)*100.0);
@@ -2198,7 +2338,11 @@ module tb_TOP_1;
         $fwrite(fh,"     Res_out  >10%% cond-err  : %0d\n", c_res);
         $fwrite(fh,"     exponent mismatches     : %0d\n", c_exp);
         $fwrite(fh,"     output-block errors     : %0d\n", c_fc);
+        $fwrite(fh,"     missed PE overflows     : %0d\n", c_ovf_miss);
+        $fwrite(fh,"   tests with PE overflow flagged : %0d\n", c_ovf);
         $fwrite(fh,"   blocks flagged out of range : %0d  (E clamped, reported, not a failure)\n", c_oor);
+        $fwrite(fh,"   blocks by non-zero count : n=0:%0d  n=1:%0d  n=2:%0d  n=3:%0d  n=4:%0d\n",
+                cov_n[0], cov_n[1], cov_n[2], cov_n[3], cov_n[4]);
         $fwrite(fh,"   worst block-normalised    : %.3f %%\n", s_fcworst*100.0);
         $fwrite(fh,"   tests with sign flips   : %0d\n", s_flip);
         $fwrite(fh,"   worst cond-err          : %.3f %%\n", s_worst*100.0);

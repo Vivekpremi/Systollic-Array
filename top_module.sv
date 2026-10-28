@@ -1,77 +1,102 @@
 `timescale 1ns/1ps
 
 //=============================================================================
-// top_module.sv  (edge_reg_bank integrated)
+// top_module.sv  --  the accelerator core: one 4x4 x 4x4 tile, blocks in, blocks out
 //
-// edge_reg_bank is now the front door. Operands enter as one packed 32-bit
-// BLOCK per lane (mantissas[19:0] + scale[23:20] + exp[31:24]) plus per-lane
-// write-enables. The bank descales + demand-paces them into the systolic array
-// (set_i_ready from the array closes the demand loop). iface + format_convertor
-// are unchanged. The old already-descaled mantissa_*_0 inputs are removed.
+// WHAT IT DOES
+//   C = A x B for one tile (ARRAY_SIZE x ARRAY_SIZE), in the block format:
+//     input : ARRAY_SIZE row blocks (row i of A) + ARRAY_SIZE column blocks
+//             (column j of B), written with row_we / col_we
+//     output: ARRAY_SIZE output blocks, block j = column j of C, one per
+//             block_ready pulse, in the SAME format as the inputs (so a
+//             result can be fed back in as an operand)
+//
+// DATA PATH
+//   edge_reg_bank -> systolic_array -> iface -> format_convertor
+//     edge_reg_bank   : stores the blocks, feeds one element per product into
+//                       the array edges (L -> L << scale)
+//     systolic_array  : 4x4 PEs, PE[i][j] accumulates C[i][j]
+//     iface           : sends each finished column of results, 2 per clock
+//     format_convertor: turns a column of results into one output block
+//
+// BLOCK FORMAT (BLOCK_WIDTH bits, 48 at the defaults)
+//   value = (-1)^sign * 2^(E + L * 2^scale / 2^FRAC_WIDTH), or 0 if zero = 1
+//   L of each element [MANT_BUS_WIDTH-1:0] (element 0 lowest), then
+//   ARRAY_SIZE zero flags, ARRAY_SIZE sign bits, scale, E (signed), unused
+//   top bits = 0. Defaults: L [23:0], zero [27:24], sign [31:28],
+//   scale [35:32], E [43:36].
+//
+// USE
+//   reset -> write all 2*ARRAY_SIZE blocks in the SAME clock -> wait for
+//   ARRAY_SIZE block_ready pulses (columns 0, 1, 2, 3) -> reset before the
+//   next tile (the PE accumulators clear only on reset).
+//
+// FLAGS
+//   exp_overflow / exp_underflow : with each output block: its E did not fit
+//                                  and was clamped
+//   pe_overflow[i*ARRAY_SIZE+j]  : PE[i][j] lost top bits (sticky until reset)
+//   acc_overflow                 : OR of all pe_overflow bits
+//
+// LIMITATIONS
+//   ARRAY_SIZE must be 4 for now (iface pairs results; format_convertor only
+//   divides by 1..4), FRAC_WIDTH must be 8 (CORDIC table). Number range
+//   limits: see docs/numeric_range.md.
 //=============================================================================
 module top_module #(
-    parameter MANTISSA_WIDTH = 16,
-    parameter FRAC_WIDTH = 8,
-    parameter EXP_WIDTH = 8,
-    parameter DATA_WIDTH = 32,
-    parameter ARRAY_SIZE = 4,
+    parameter MANTISSA_WIDTH = 16,   // bits of the PE log operand (INT.FRAC, 8.8 by default)
+    parameter FRAC_WIDTH = 8,        // fraction bits of every log value (must be 8)
+    parameter EXP_WIDTH = 8,         // bits of a block exponent E (signed)
+    parameter DATA_WIDTH = 32,       // PE product width; accumulator DATA_WIDTH+1
+    parameter ARRAY_SIZE = 4,        // PEs per side = elements per block (must be 4 for now)
     parameter LOG2_ARRAY_SIZE = $clog2(ARRAY_SIZE),
-    // residual log L per element, two's complement. ONE value for BOTH the
-    // input and the output block: the two formats are identical so a tile's
-    // result can be fed straight back in as an operand.
+    // L: residual log per element, signed; the same width for input and output blocks
     parameter BLOCK_MANTISSA_WIDTH = 6,
-    parameter SCALE_FACTOR_WIDTH = 4,
-    parameter MANT_BUS_WIDTH = ARRAY_SIZE*BLOCK_MANTISSA_WIDTH,
+    parameter SCALE_FACTOR_WIDTH = 4,   // bits of the block scale
+    // ---- block geometry (identical in edge_reg_bank, format_convertor, testbenches) ----
+    parameter MANT_BUS_WIDTH = ARRAY_SIZE*BLOCK_MANTISSA_WIDTH,   // all L fields
     parameter BLOCK_BITS     = MANT_BUS_WIDTH + 2*ARRAY_SIZE
-                               + SCALE_FACTOR_WIDTH + EXP_WIDTH,
-    parameter BLOCK_WIDTH    = ((BLOCK_BITS + 7)/8)*8
+                               + SCALE_FACTOR_WIDTH + EXP_WIDTH,  // bits used
+    parameter BLOCK_WIDTH    = ((BLOCK_BITS + 7)/8)*8             // rounded up to whole bytes
 )(
     input wire clk,
-    input wire rst_n,
+    input wire rst_n,    // async, active low; also clears the tile (one tile per reset)
 
-    // ---- operand input: one packed 32-bit BLOCK per lane + write-enable ----
-    input  wire                    row_we    [ARRAY_SIZE-1:0],
-    input  wire                    col_we    [ARRAY_SIZE-1:0],
-    input  wire [BLOCK_WIDTH-1:0]  row_block [ARRAY_SIZE-1:0],
-    input  wire [BLOCK_WIDTH-1:0]  col_block [ARRAY_SIZE-1:0],
+    // ---- input blocks: write all lanes in the same clock ----
+    input  wire                    row_we    [ARRAY_SIZE-1:0],   // store row_block[i]
+    input  wire                    col_we    [ARRAY_SIZE-1:0],   // store col_block[i]
+    input  wire [BLOCK_WIDTH-1:0]  row_block [ARRAY_SIZE-1:0],   // row i of A
+    input  wire [BLOCK_WIDTH-1:0]  col_block [ARRAY_SIZE-1:0],   // column i of B
 
-    // ---- observability / outputs (same as before) ----
-    output wire [ARRAY_SIZE-1:0] valid_out [ARRAY_SIZE-1:0],
-    output wire valid_exp_out,
-    output wire signed [EXP_WIDTH:0] exponent_out_1,
-    output wire signed [EXP_WIDTH:0] exponent_out_2,
-    output wire signed [DATA_WIDTH:0] mantissa_out_1,
+    // ---- debug / testbench outputs (not used by the AXI wrapper) ----
+    output wire [ARRAY_SIZE-1:0] valid_out [ARRAY_SIZE-1:0],   // valid_out[i][j]: PE[i][j] result final
+    output wire signed [DATA_WIDTH:0] mantissa_out_1,          // iface -> FC: Res_out pair
     output wire signed [DATA_WIDTH:0] mantissa_out_2,
-    output wire signed [EXP_WIDTH:0] exp_m_out_1,
+    output wire signed [EXP_WIDTH:0] exp_m_out_1,              // iface -> FC: exp_out pair
     output wire signed [EXP_WIDTH:0] exp_m_out_2,
-    output wire valid_man_out,
-    output wire [1:0] iface_state_out,
-    output wire set_i_ready[ARRAY_SIZE-1:0],
-    output wire signed [DATA_WIDTH:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
-    output wire last_exp_sent,
-    output wire mantissas_sent_out,
-    output wire block_ready,
-    output wire [SCALE_FACTOR_WIDTH-1:0] scale_factor,
-    output wire signed [EXP_WIDTH-1:0] max_exp,
-    output wire [MANT_BUS_WIDTH-1:0] mantissa_out,
-    // the OUTPUT block, same layout/semantics as row_block/col_block so a
-    // tile's result can be fed straight back in as a tile's operand
-    output wire [BLOCK_WIDTH-1:0] block_out,      // same width/layout as row_block/col_block
+    output wire valid_man_out,                                 // iface -> FC: a pair is valid
+    output wire set_i_ready[ARRAY_SIZE-1:0],                   // array -> bank pacing pulses
+    output wire signed [DATA_WIDTH:0] Res_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],   // every PE accumulator
+    output wire mantissas_sent_out,                            // iface -> FC: last pair of a column
+
+    // ---- output blocks ----
+    output wire block_ready,                                   // 1-clock pulse: a new output block
+    output wire [SCALE_FACTOR_WIDTH-1:0] scale_factor,         // the block's fields, separately
+    output wire signed [EXP_WIDTH-1:0] max_exp,                //   (E)
+    output wire [MANT_BUS_WIDTH-1:0] mantissa_out,             //   (all L)
+    output wire [BLOCK_WIDTH-1:0] block_out,                   // the packed output block (input format)
     output wire [ARRAY_SIZE-1:0] sign_out,
     output wire [ARRAY_SIZE-1:0] zero_out,
-    output wire max_exp_calculated,
-    output wire exp_overflow,     // output block E clamped high (result out of range)
-    output wire exp_underflow,    // output block E clamped low
+    output wire exp_overflow,     // this block's E was too large and clamped
+    output wire exp_underflow,    // this block's E was too small and clamped
+    output wire [ARRAY_SIZE*ARRAY_SIZE-1:0] pe_overflow,   // PE[i][j] overflow (sticky)
+    output wire acc_overflow,     // OR of pe_overflow
 
-    // ---- per-PE exponent, exposed so the testbench can CHECK the
-    //      hardware exponent path instead of trusting its own copy ----
-    output wire signed [EXP_WIDTH:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],
+    output wire signed [EXP_WIDTH:0] exp_out [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0],   // every PE's Er + Ec (debug)
 
-    // ---- bank status ----
-    output wire bank_primed
+    output wire bank_primed       // all lanes of edge_reg_bank have a block
 );
 
-// ---- bank <-> array edge wires (descaled operands the bank produces) ----
+// ---- edge_reg_bank -> systolic_array: the current element of each lane ----
 wire signed [MANTISSA_WIDTH-1:0] mantissa_col_0 [ARRAY_SIZE-1:0];
 wire signed [MANTISSA_WIDTH-1:0] mantissa_row_0 [ARRAY_SIZE-1:0];
 wire signed [EXP_WIDTH-1:0]      exponent_col_0 [ARRAY_SIZE-1:0];
@@ -84,12 +109,7 @@ wire                      valid_in_row_0 [ARRAY_SIZE-1:0];
 wire                      valid_in_col_0 [ARRAY_SIZE-1:0];
 wire                      last_in_row_0  [ARRAY_SIZE-1:0];
 wire                      last_in_col_0  [ARRAY_SIZE-1:0];
-wire [LOG2_ARRAY_SIZE-1:0] dbg_row_ptr [ARRAY_SIZE-1:0];
-wire [LOG2_ARRAY_SIZE-1:0] dbg_col_ptr [ARRAY_SIZE-1:0];
 
-wire demand_from_mem [ARRAY_SIZE-1:0];
-
-// ---- edge register bank (front door) ----
 edge_reg_bank #(
     .ARRAY_SIZE(ARRAY_SIZE), .MANTISSA_WIDTH(MANTISSA_WIDTH), .EXP_WIDTH(EXP_WIDTH),
     .BLOCK_MANTISSA_WIDTH(BLOCK_MANTISSA_WIDTH), .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
@@ -114,9 +134,7 @@ bank (
     .valid_in_col_0(valid_in_col_0),
     .last_in_row_0(last_in_row_0),
     .last_in_col_0(last_in_col_0),
-    .bank_primed(bank_primed),
-    .dbg_row_ptr(dbg_row_ptr),
-    .dbg_col_ptr(dbg_col_ptr)
+    .bank_primed(bank_primed)
 );
 
 systolic_array #(
@@ -143,9 +161,21 @@ SA (
     .last_in_row_0(last_in_row_0),
     .last_in_col_0(last_in_col_0),
     .set_i_ready(set_i_ready),
-    .demand_from_mem(demand_from_mem)
+    .pe_overflow(pe_overflow)
 );
 
+assign acc_overflow = |pe_overflow;
+
+// ---------------------------------------------------------------------------
+// When iface may start the next column (start_op)
+//   block_cnt : output blocks produced so far in this tile (0..ARRAY_SIZE-1)
+//   Before PE[0][1] has finished (valid_out[0][1] = 0): start when PE[0][0]
+//   has finished, i.e. column 0 can begin.
+//   After that: start each next column when the previous column's block is
+//   out (block_ready). block_cnt != ARRAY_SIZE-1 stops a start after the
+//   last column's block.
+//   (iface itself then waits until the whole column is finished.)
+// ---------------------------------------------------------------------------
 reg [LOG2_ARRAY_SIZE-1:0] block_cnt;
 wire start_op = ((valid_out[0][1]) ? block_ready : valid_out[0][0]) && (block_cnt != LOG2_ARRAY_SIZE'(ARRAY_SIZE-1));
 
@@ -161,8 +191,7 @@ always @(posedge clk or negedge rst_n) begin
 end
 
 iface #(
-    .DATA_WIDTH(DATA_WIDTH), .EXP_WIDTH(EXP_WIDTH), .ARRAY_SIZE(ARRAY_SIZE),
-    .BLOCK_MANTISSA_WIDTH(BLOCK_MANTISSA_WIDTH), .SCALE_FACTOR_WIDTH(SCALE_FACTOR_WIDTH)
+    .DATA_WIDTH(DATA_WIDTH), .EXP_WIDTH(EXP_WIDTH), .ARRAY_SIZE(ARRAY_SIZE)
 ) iface(
     .clk(clk),
     .rst_n(rst_n),
@@ -170,18 +199,12 @@ iface #(
     .valid_column (valid_out),
     .mantissa (Res_out),
     .exponent (exp_out),
-    .max_exp_calculated (max_exp_calculated),
 
-    .valid_exp_out (valid_exp_out),
-    .exp_out_1 (exponent_out_1),
-    .exp_out_2 (exponent_out_2),
     .mantissa_out_1 (mantissa_out_1),
     .mantissa_out_2 (mantissa_out_2),
     .exp_m_out_1 (exp_m_out_1),
     .exp_m_out_2 (exp_m_out_2),
     .valid_man_out (valid_man_out),
-    .state_out (iface_state_out),
-    .last_exp_sent (last_exp_sent),
     .mantissas_sent_out (mantissas_sent_out)
 );
 
@@ -197,10 +220,6 @@ format_convertor #(
     .exp_m_2(exp_m_out_2),
     .mantissa_valid(valid_man_out),
     .all_mantissas_sent(mantissas_sent_out),
-    .exp0(exponent_out_1),
-    .exp1(exponent_out_2),
-    .exp_valid(valid_exp_out),
-    .last_exp_sent(last_exp_sent),
 
     .block_out(block_out),
     .max_exp(max_exp),
@@ -210,8 +229,7 @@ format_convertor #(
     .zero_out(zero_out),
     .block_ready(block_ready),
     .exp_overflow(exp_overflow),
-    .exp_underflow(exp_underflow),
-    .max_exp_calculated(max_exp_calculated)
+    .exp_underflow(exp_underflow)
 );
 
 endmodule
